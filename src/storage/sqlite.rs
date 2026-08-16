@@ -10,9 +10,9 @@ use futures::{FutureExt as _, channel::oneshot, future::BoxFuture};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::config::{
-    AppSettings, AppTheme, AudioQuality, EqualizerProfile, EqualizerSettings,
-    ListenTogetherSettings, LoudnessLevel, ParametricEqualizer, PlaybackParameters, ProxyKind,
-    ProxySettings,
+    AppSettings, AppTheme, AudioQuality, AutomaticSleepTimerSchedule, EqualizerProfile,
+    EqualizerSettings, ListenTogetherSettings, LoudnessLevel, ParametricEqualizer,
+    PlaybackParameters, ProxyKind, ProxySettings,
 };
 #[cfg(test)]
 use crate::domain::ArtistCredit;
@@ -20,7 +20,7 @@ use crate::domain::{AlbumCredit, BrowseItem, BrowseKind, LyricsDocument, LyricsL
 use crate::services::{RecognitionResult, RepeatMode};
 use crate::{AppError, Result};
 
-const SCHEMA_VERSION: i64 = 45;
+const SCHEMA_VERSION: i64 = 46;
 const LOCAL_PLAYLIST_PREVIEW_COLUMNS: &str = r#"
     (SELECT s.thumbnail_url
      FROM local_playlist_song preview
@@ -430,6 +430,9 @@ enum StoreCommand {
         playlist_id: i64,
         songs: Vec<Song>,
         reply: oneshot::Sender<Result<()>>,
+    },
+    LocalPlaylistSongs {
+        reply: oneshot::Sender<Result<Vec<Song>>>,
     },
     PlaylistSongs {
         playlist_id: i64,
@@ -1219,6 +1222,19 @@ impl DesktopStore {
         async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
     }
 
+    pub fn local_playlist_songs(&self) -> BoxFuture<'static, Result<Vec<Song>>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::LocalPlaylistSongs { reply })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
     pub fn playlist_songs(&self, playlist_id: i64) -> BoxFuture<'static, Result<Vec<Song>>> {
         let (reply, receiver) = oneshot::channel();
         if self
@@ -1820,6 +1836,9 @@ fn run_store_worker(
             } => {
                 let _ = reply.send(add_many_to_playlist(&mut connection, playlist_id, &songs));
             }
+            StoreCommand::LocalPlaylistSongs { reply } => {
+                let _ = reply.send(local_playlist_songs(&connection));
+            }
             StoreCommand::PlaylistSongs { playlist_id, reply } => {
                 let _ = reply.send(playlist_songs(&connection, playlist_id));
             }
@@ -2126,6 +2145,9 @@ fn open_and_migrate(path: &Path) -> Result<Connection> {
     }
     if current_version < 45 {
         migrate_to_v45(&mut connection)?;
+    }
+    if current_version < 46 {
+        migrate_to_v46(&mut connection)?;
     }
     Ok(connection)
 }
@@ -3171,6 +3193,23 @@ fn migrate_to_v45(connection: &mut Connection) -> Result<()> {
     transaction
         .execute(
             "INSERT INTO schema_migration(version, applied_at_ms) VALUES (45, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v46(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN automatic_sleep_timer_schedule TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (46, ?1)",
             [now_ms()],
         )
         .map_err(storage_error)?;
@@ -4441,6 +4480,26 @@ fn add_many_to_playlist(
     transaction.commit().map_err(storage_error)
 }
 
+fn local_playlist_songs(connection: &Connection) -> Result<Vec<Song>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+             FROM local_playlist_song ps
+             JOIN song s ON s.video_id = ps.video_id
+             ORDER BY s.video_id ASC",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map([], |row| song_from_row(row, 0))
+        .map_err(storage_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
 fn playlist_songs(connection: &Connection, playlist_id: i64) -> Result<Vec<Song>> {
     let mut statement = connection
         .prepare(
@@ -4962,6 +5021,12 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
         serde_json::to_string(&settings.equalizer.gains_mb).map_err(|error| {
             AppError::Storage(format!("equalizer settings could not be saved: {error}"))
         })?;
+    let automatic_sleep_timer_schedule = serde_json::to_string(&settings.automatic_sleep_timer)
+        .map_err(|error| {
+            AppError::Storage(format!(
+                "automatic sleep timer schedule could not be saved: {error}"
+            ))
+        })?;
     let cache_root = settings
         .cache_root
         .to_str()
@@ -5003,10 +5068,11 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  auto_skip_next_on_error, shuffle_playlist_first, pause_on_mute,
                  progressive_seek, auto_download_on_like, auto_radio_queue,
                  auto_load_more, sleep_timer_stop_after_current_song,
-                 sleep_timer_fade_out, skip_silence, skip_silence_instant,
+                 sleep_timer_fade_out, automatic_sleep_timer_schedule,
+                 skip_silence, skip_silence_instant,
                  crossfade, crossfade_seconds, crossfade_gapless_albums,
                  content_language, content_country
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57)
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58)
              ON CONFLICT(singleton) DO UPDATE SET
                  proxy_enabled = excluded.proxy_enabled,
                  proxy_kind = excluded.proxy_kind,
@@ -5058,6 +5124,7 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  auto_load_more = excluded.auto_load_more,
                  sleep_timer_stop_after_current_song = excluded.sleep_timer_stop_after_current_song,
                  sleep_timer_fade_out = excluded.sleep_timer_fade_out,
+                 automatic_sleep_timer_schedule = excluded.automatic_sleep_timer_schedule,
                  skip_silence = excluded.skip_silence,
                  skip_silence_instant = excluded.skip_silence_instant,
                  crossfade = excluded.crossfade,
@@ -5116,6 +5183,7 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                 settings.auto_load_more,
                 settings.sleep_timer_stop_after_current_song,
                 settings.sleep_timer_fade_out,
+                automatic_sleep_timer_schedule,
                 settings.skip_silence,
                 settings.skip_silence_instant,
                 settings.crossfade,
@@ -5153,7 +5221,8 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     auto_skip_next_on_error, shuffle_playlist_first, pause_on_mute,
                     progressive_seek, auto_download_on_like, auto_radio_queue,
                     auto_load_more, sleep_timer_stop_after_current_song,
-                    sleep_timer_fade_out, skip_silence, skip_silence_instant,
+                    sleep_timer_fade_out, automatic_sleep_timer_schedule,
+                    skip_silence, skip_silence_instant,
                     crossfade, crossfade_seconds, crossfade_gapless_albums,
                     content_language, content_country
              FROM app_settings WHERE singleton = 1",
@@ -5209,13 +5278,14 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     row.get::<_, bool>(46)?,
                     row.get::<_, bool>(47)?,
                     row.get::<_, bool>(48)?,
-                    row.get::<_, bool>(49)?,
+                    row.get::<_, String>(49)?,
                     row.get::<_, bool>(50)?,
                     row.get::<_, bool>(51)?,
-                    row.get::<_, u8>(52)?,
-                    row.get::<_, bool>(53)?,
-                    row.get::<_, String>(54)?,
+                    row.get::<_, bool>(52)?,
+                    row.get::<_, u8>(53)?,
+                    row.get::<_, bool>(54)?,
                     row.get::<_, String>(55)?,
+                    row.get::<_, String>(56)?,
                 ))
             },
         )
@@ -5271,6 +5341,7 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         auto_load_more,
         sleep_timer_stop_after_current_song,
         sleep_timer_fade_out,
+        automatic_sleep_timer_schedule,
         skip_silence,
         skip_silence_instant,
         crossfade,
@@ -5295,6 +5366,22 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                 "stored active equalizer profile is invalid: {error}"
             ))
         })?;
+    let automatic_sleep_timer = if automatic_sleep_timer_schedule.trim().is_empty() {
+        AutomaticSleepTimerSchedule::default()
+    } else {
+        serde_json::from_str::<AutomaticSleepTimerSchedule>(&automatic_sleep_timer_schedule)
+            .map_err(|error| {
+                AppError::Storage(format!(
+                    "stored automatic sleep timer schedule is invalid: {error}"
+                ))
+            })?
+    }
+    .validate()
+    .map_err(|error| {
+        AppError::Storage(format!(
+            "stored automatic sleep timer schedule is invalid: {error}"
+        ))
+    })?;
     let settings = AppSettings {
         proxy: ProxySettings {
             enabled: proxy_enabled,
@@ -5325,6 +5412,7 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         auto_load_more,
         sleep_timer_stop_after_current_song,
         sleep_timer_fade_out,
+        automatic_sleep_timer,
         skip_silence,
         skip_silence_instant,
         crossfade,
@@ -7289,6 +7377,7 @@ mod tests {
             auto_load_more: false,
             sleep_timer_stop_after_current_song: true,
             sleep_timer_fade_out: true,
+            automatic_sleep_timer: AutomaticSleepTimerSchedule::default(),
             skip_silence: true,
             skip_silence_instant: true,
             crossfade: true,
@@ -7365,6 +7454,7 @@ mod tests {
             auto_load_more: true,
             sleep_timer_stop_after_current_song: false,
             sleep_timer_fade_out: false,
+            automatic_sleep_timer: AutomaticSleepTimerSchedule::default(),
             skip_silence: false,
             skip_silence_instant: false,
             crossfade: false,
@@ -7496,6 +7586,7 @@ mod tests {
             auto_load_more: true,
             sleep_timer_stop_after_current_song: false,
             sleep_timer_fade_out: false,
+            automatic_sleep_timer: AutomaticSleepTimerSchedule::default(),
             skip_silence: false,
             skip_silence_instant: false,
             crossfade: false,

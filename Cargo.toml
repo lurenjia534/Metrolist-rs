@@ -18,6 +18,7 @@ osx_info_plist_exts = ["packaging/macos/Info.plist.ext"]
 
 [dependencies]
 base64 = "=0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 crc32fast = "=1.5.0"
 dirs = "6"
 discord-rich-presence = "=1.1.0"

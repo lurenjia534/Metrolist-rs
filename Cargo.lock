@@ -7,6 +7,7 @@ name = "Metrolist-rs"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "crc32fast",
  "dirs",
  "discord-rich-presence",

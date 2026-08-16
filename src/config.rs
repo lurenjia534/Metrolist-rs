@@ -20,6 +20,12 @@ pub const DEFAULT_HISTORY_DURATION_SECONDS: u16 = 30;
 pub const MIN_CROSSFADE_SECONDS: u8 = 1;
 pub const MAX_CROSSFADE_SECONDS: u8 = 15;
 pub const DEFAULT_CROSSFADE_SECONDS: u8 = 5;
+pub const MIN_SLEEP_TIMER_MINUTES: u16 = 5;
+pub const MAX_SLEEP_TIMER_MINUTES: u16 = 120;
+pub const DEFAULT_SLEEP_TIMER_MINUTES: u16 = 30;
+pub const SLEEP_TIMER_MINUTES_PER_DAY: u16 = 24 * 60;
+pub const DEFAULT_SLEEP_TIMER_START_MINUTE: u16 = 22 * 60;
+pub const DEFAULT_SLEEP_TIMER_END_MINUTE: u16 = 6 * 60;
 pub const SYSTEM_CONTENT_LOCALE: &str = "system";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1461,6 +1467,89 @@ impl ListenTogetherSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepTimerWindow {
+    pub start_minute: u16,
+    pub end_minute: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticSleepTimerSchedule {
+    pub enabled: bool,
+    pub duration_minutes: u16,
+    pub windows: [Option<SleepTimerWindow>; 7],
+}
+
+impl Default for AutomaticSleepTimerSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            duration_minutes: DEFAULT_SLEEP_TIMER_MINUTES,
+            windows: [Some(SleepTimerWindow {
+                start_minute: DEFAULT_SLEEP_TIMER_START_MINUTE,
+                end_minute: DEFAULT_SLEEP_TIMER_END_MINUTE,
+            }); 7],
+        }
+    }
+}
+
+impl AutomaticSleepTimerSchedule {
+    pub fn validate(self) -> Result<Self> {
+        if !(MIN_SLEEP_TIMER_MINUTES..=MAX_SLEEP_TIMER_MINUTES).contains(&self.duration_minutes) {
+            return Err(AppError::InvalidConfig(format!(
+                "automatic sleep timer duration must be between {MIN_SLEEP_TIMER_MINUTES} and {MAX_SLEEP_TIMER_MINUTES} minutes"
+            )));
+        }
+        for window in self.windows.into_iter().flatten() {
+            if window.start_minute >= SLEEP_TIMER_MINUTES_PER_DAY
+                || window.end_minute >= SLEEP_TIMER_MINUTES_PER_DAY
+            {
+                return Err(AppError::InvalidConfig(
+                    "automatic sleep timer windows must use times between 00:00 and 23:59".into(),
+                ));
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn matches(&self, weekday: usize, minute: u16) -> bool {
+        if !self.enabled || weekday >= self.windows.len() || minute >= SLEEP_TIMER_MINUTES_PER_DAY {
+            return false;
+        }
+
+        let current = self.windows[weekday];
+        if let Some(window) = current {
+            if window.start_minute == window.end_minute {
+                return false;
+            }
+            if window.start_minute < window.end_minute
+                && minute >= window.start_minute
+                && minute < window.end_minute
+            {
+                return true;
+            }
+            if window.start_minute > window.end_minute && minute >= window.start_minute {
+                return true;
+            }
+        }
+
+        let previous_weekday = (weekday + self.windows.len() - 1) % self.windows.len();
+        self.windows[previous_weekday].is_some_and(|window| {
+            window.start_minute > window.end_minute && minute < window.end_minute
+        })
+    }
+
+    pub fn matches_local_time(&self) -> bool {
+        use chrono::{Datelike as _, Local, Timelike as _};
+
+        let now = Local::now();
+        self.matches(
+            now.weekday().num_days_from_monday() as usize,
+            now.hour() as u16 * 60 + now.minute() as u16,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
     pub proxy: ProxySettings,
@@ -1478,6 +1567,7 @@ pub struct AppSettings {
     pub auto_load_more: bool,
     pub sleep_timer_stop_after_current_song: bool,
     pub sleep_timer_fade_out: bool,
+    pub automatic_sleep_timer: AutomaticSleepTimerSchedule,
     pub persistent_queue: bool,
     pub autoplay: bool,
     pub auto_skip_next_on_error: bool,
@@ -1530,6 +1620,7 @@ impl AppSettings {
             auto_load_more: true,
             sleep_timer_stop_after_current_song: false,
             sleep_timer_fade_out: false,
+            automatic_sleep_timer: AutomaticSleepTimerSchedule::default(),
             persistent_queue: true,
             autoplay: true,
             auto_skip_next_on_error: false,
@@ -1595,6 +1686,7 @@ impl AppSettings {
         }
         self.equalizer.validate()?;
         self.playback_parameters.validate()?;
+        self.automatic_sleep_timer = self.automatic_sleep_timer.validate()?;
         self.lastfm_scrobble_policy.validate()?;
         self.listen_together = self.listen_together.validate()?;
         if !self.cache_root.is_absolute() {
@@ -1775,6 +1867,7 @@ mod tests {
             auto_load_more: true,
             sleep_timer_stop_after_current_song: false,
             sleep_timer_fade_out: false,
+            automatic_sleep_timer: AutomaticSleepTimerSchedule::default(),
             persistent_queue: true,
             autoplay: true,
             auto_skip_next_on_error: false,
