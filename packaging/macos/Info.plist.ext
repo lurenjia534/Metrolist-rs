@@ -1,0 +1,2 @@
+<key>NSMicrophoneUsageDescription</key>
+<string>Metrolist accesses the microphone only after you start song recognition, records at most 12 seconds, processes audio in memory, and sends an encoded signature to Shazam to identify the song.</string>
