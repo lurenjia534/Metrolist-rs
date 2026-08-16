@@ -2,8 +2,27 @@
 name = "Metrolist-rs"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
+
+[lib]
+name = "metrolist_rs"
+
+[[bin]]
+name = "metrolist"
+path = "src/main.rs"
+
+[package.metadata.bundle]
+name = "Metrolist"
+identifier = "com.metrolist.music.desktop"
+osx_info_plist_exts = ["packaging/macos/Info.plist.ext"]
 
 [dependencies]
+base64 = "=0.22.1"
+crc32fast = "=1.5.0"
+dirs = "6"
+discord-rich-presence = "=1.1.0"
+fastrand = "2.5"
+flate2 = "=1.1.9"
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "font-kit",
@@ -12,3 +31,43 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "x11",
 ] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c" }
+futures = "0.3"
+http_client = { git = "https://github.com/zed-industries/zed" }
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "pnm",
+    "png",
+    "tiff",
+    "webp",
+] }
+keyring = "4.1.6"
+md-5 = "=0.10.6"
+prost = "=0.14.4"
+reqwest_client = { git = "https://github.com/zed-industries/zed" }
+rodio = { version = "0.22.2", default-features = false, features = ["mp4", "playback"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "=0.7.1"
+sha1 = "0.10.7"
+souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+notify-rust = "4.18.0"
+tungstenite = { version = "=0.30.0", features = ["rustls-tls-native-roots"] }
+wry = { version = "=0.56.1", features = ["mac-proxy"] }
+tao = "=0.36.0"
+wsola = "=0.1.0"
+zeroize = "1.9.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = { version = "0.6", features = ["std"] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus = "=3.15.2"
