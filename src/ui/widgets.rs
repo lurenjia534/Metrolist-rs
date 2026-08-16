@@ -108,12 +108,15 @@ pub fn list_row_shell(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     h_flex()
         .id(id)
         .w_full()
+        .h_full()
         .min_w_0()
+        .overflow_hidden()
         .gap_3()
         .items_center()
         .rounded(cx.theme().radius)
         .px_2()
         .py_1()
+        .cursor_pointer()
         .hover(|style| style.bg(cx.theme().secondary))
 }
 
