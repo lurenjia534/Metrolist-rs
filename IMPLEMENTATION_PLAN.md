@@ -24,6 +24,224 @@ Android Metrolist 只读参考业务行为和点击路径；桌面 UI 以锁定�
 
 P2/P3 已存在的代码只做回归维护，在 P0 矩阵全部完成前不得继续扩展。
 
+## 已实现切片：Automatic Sleep Timer Schedule
+
+状态：功能、持久化与 UI 已实现，待真实桌面时区/播放转换点击验收。
+
+Android 会在播放由暂停切到 Playing 时，根据本地星期与时间窗口自动启动默认时长的 Sleep Timer；
+支持每日、工作日/周末及自定义日期和跨午夜窗口。Desktop 已有真实 Deadline、End of song、Fade out
+计时器及 Settings 行为，但计划明确记录自动日程尚未移植。本切片把日程持久化、可点击设置和现有
+计时器触发链接通，不建立第二套计时服务。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `Cargo.toml` / `src/config.rs` | 跨平台本地日期时间与可校验的七日日程模型 |
+| `src/storage/sqlite.rs` | 持久化自动日程并升级 schema v46，旧设置默认关闭 |
+| `src/ui/shell.rs` | Settings 可编辑启用、时长、日期和逐日时间窗口；Playing 转换触发现有 Sleep Timer |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 登记自动日程真实闭环与剩余时区/桌面点击验收 |
+
+### 完成定义
+
+1. Settings 可发现并启用 Automatic sleep timer，默认关闭；默认 30 分钟、每日 22:00–06:00，所有值
+   跨重启保留且 Reset 恢复已保存值。
+2. 可选择每日、工作日、周末及自定义星期组合，并可编辑每个启用日的开始/结束时间；支持跨午夜窗口，
+   非法时长、日期或时间不能保存。
+3. 本地播放从非 Playing 进入 Playing 时，若当前本地星期/时间命中日程且没有活动计时器，自动复用
+   现有 minute Deadline，并继承 Finish current song 与 Fade out 设置。
+4. 同一活动计时器不会因轮询或切歌重复启动；暂停后在窗口内恢复且计时器已取消时可再次自动启动。
+5. Listen Together Guest 不自动创建本地计时器；关闭日程、窗口外、未选日期均不改变播放。
+6. 旧 v45 数据库无损升级到 v46 且日程默认关闭；不修改 Android 仓库，不新增计时线程、平行播放器、
+   测试或验证设施。
+7. 仅执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：新增可序列化并校验的七日 Automatic Sleep Timer schedule，默认关闭、30 分钟且每日窗口
+为 22:00–06:00；每个星期可独立启用并保存 start/end minute，匹配同时支持当日窗口和前一日跨午夜
+延续。Settings 现可开关日程、以 5 分钟调整 5–120 分钟时长、应用 Daily/Weekdays/Weekends 预设，
+并逐日开关及以 30 分钟调整显示为 HH:MM 的开始/结束时间。播放 observed state 仅在非 Playing 转为
+Playing 时检查本地时间，命中、无活动 timer 且非 Guest 才复用现有 Deadline timer，因此轮询与切歌
+不会重启，Finish current song 与 Fade out 继续由同一计时器实现。SQLite v46 以 JSON TEXT 保存完整
+日程，v45 升级默认关闭；增加锁定 `chrono` 直接依赖读取跨平台本地星期/时间。没有新增计时线程、
+播放器、测试或验证设施。
+仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
+## 已实现切片：Stats Period Request Freshness
+
+状态：功能与异步状态归属已实现，待真实桌面快速周期切换验收。
+
+Android `StatsViewModel` 以 latest 语义响应周期切换。Desktop 的 `reload_stats()` 在已有请求时直接返回，
+因此用户快速切换周期后，旧周期查询可能在新 Tab 下完成并覆盖界面。本切片给现有统计请求增加代际/
+周期归属，只允许最新选择更新 UI，不改统计 SQL 或聚合模型。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/ui/shell.rs` | Stats 请求代际与周期核对，快速切换立即发起最新查询并丢弃旧结果 |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 登记周期 latest 语义与剩余桌面点击验收 |
+
+### 完成定义
+
+1. 每次有效周期切换都以新代际请求所选周期，不因旧任务仍在运行而忽略用户选择。
+2. 旧周期成功或失败结果均不能覆盖当前周期的 Loading、Loaded 或 Failed 状态。
+3. 最新请求完成后清除忙碌状态，Top Songs/Artists/Albums 与总览继续来自该周期现有真实 SQL。
+4. 初次进入、Retry、重复点击当前周期和离开/返回 Stats 的现有行为保持稳定。
+5. 不修改统计查询、schema、播放历史写入、测试或验证设施。
+6. 仅执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：Stats 现维护请求 generation；初次进入与 Retry 仍沿用既有防重复入口，有效周期切换则
+立即递增代际并请求新周期，不再被旧任务阻塞。任意旧代际的成功或失败返回都会在更新状态前被丢弃，
+也不能清除最新 `stats_task`；只有最新请求能写入 Loading 后的 Loaded/Failed。重复点击当前周期不发
+请求，现有 `listening_stats` SQL、总览与 Top Songs/Artists/Albums 聚合均未修改，也没有新增 schema、
+测试或验证设施。
+仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
+## 已实现切片：Remote History Delete Eligibility
+
+状态：功能与 UI 已实现，待真实账号远端历史点击验收。
+
+Android 只在远端历史项携带 `historyRemoveToken` 时展示删除动作。Desktop 允许解析缺少 feedback token
+的历史项，却始终显示 Remove remote；点击后因为没有 token 而静默无操作。本切片让 UI 可发现性与
+真实后端资格一致，不修改历史解析或远端写入协议。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/ui/shell.rs` | 仅对携带真实 feedback token 的远端历史项显示 Remove remote |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 登记远端精确删除资格与剩余账号点击验收 |
+
+### 完成定义
+
+1. 携带非空 feedback token 的远端历史项继续显示 Remove remote，并复用现有认证 feedback 删除链路。
+2. token 缺失或为空的历史项不显示删除动作，不保留可点击但无操作的占位入口。
+3. 远端行的播放、Next、Queue、Download、过滤、加载、失败和刷新保持不变。
+4. 不修改 InnerTube 解析、网络协议、存储、schema、测试或验证设施。
+5. 仅执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：远端 History 行现仅在 `feedback_token` 存在且不是空白字符串时渲染 Remove remote 及其
+分隔线，有效 token 继续进入既有认证 feedback 精确删除链路；无 token 的行仍保留播放、Play next、
+Add to queue 和 Download，但不再显示点击无反应的删除入口。本地 History 删除及所有加载、过滤、
+失败和刷新状态保持不变；没有修改解析、协议、存储、schema、测试或验证设施。
+仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
+## 已实现切片：Local Playlist Songs Discoverability
+
+状态：功能、存储读取与 UI 合并已实现，待真实桌面本地搜索/资料库点击验收。
+
+Android Library Overview 与 Local Search 会把本地资料库歌曲和已收藏歌单歌曲合并。Desktop 的
+`local_known_songs()` 当前只合并 Favorites、History、Downloads、Episodes for Later，导致只加入
+本地歌单、未进入这些来源的歌曲及其 Album/Artist 在 Local Search 与 Library Overview 中完全不可
+发现。本切片从现有本地歌单关系读取真实 Song 并合入现有本地来源，不建立第二份索引。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/storage/sqlite.rs` / `src/storage/mod.rs` | 读取所有本地歌单关联的去重真实歌曲，不修改 schema |
+| `src/ui/shell.rs` | 加载并合并该来源到 `local_known_songs()`，供 Local Search 与 Library Overview 共用 |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 登记本地歌单歌曲可发现性与剩余点击验收 |
+
+### 完成定义
+
+1. 任意歌曲只要仍存在于至少一个本地歌单，就进入现有本地已知歌曲集合；跨歌单重复按 video ID 去重。
+2. Local Search 的 Songs 与 All 能按标题/歌手找到仅存在于本地歌单的歌曲，并从当前过滤结果建立真实
+   播放队列。
+3. Library Overview 搜索能返回这些歌曲；歌曲携带的真实 Album/Artist 信息继续进入现有本地目录
+   派生与详情入口，不要求用户先浏览在线页面。
+4. 从最后一个本地歌单移除歌曲或删除歌单并刷新后，该歌曲若不属于 Favorites、History、Downloads、
+   Episodes for Later 等其他来源，就不再由歌单来源保留。
+5. SQLite 读取失败沿用现有本地分区失败/重试状态，不新增 schema、缓存表、后台索引、测试或验证设施。
+6. 仅执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：`DesktopStore` 现通过单个 `SELECT DISTINCT` 查询读取全部本地歌单关系关联的真实 Song，
+跨歌单按 video ID 去重且不修改 schema。独立的 `local_playlist_songs_state` 已接入启动加载、本地资料库
+失败重试，以及添加、单项/批量移除和删除歌单后的统一刷新，并合入 `local_known_songs()`。Local Search
+Songs/All 和 Library Overview 现可发现仅存在于本地歌单的歌曲；Local Search Albums/Artists、Library
+Overview 及 Library 的本地 Albums/Artists 也统一从真实 Song 的 album/artist ID 派生并进入既有 Browse。
+最后一个歌单关系消失后，下次刷新会自然移除该来源；其他本地来源仍可继续保留同一歌曲。没有新增
+schema、缓存表、后台索引、测试或验证设施。
+仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
+## 已实现切片：Online Search All Mixed Results
+
+状态：功能与 UI 已实现，待真实桌面混合结果点击验收。
+
+Android `OnlineSearchResult.kt` 的 All 是歌曲与 Album、Artist、Playlist、Podcast、Profile 等目录项的
+混合结果。Desktop 已解析 `songs` 与 `items`，但 All 的空态只看歌曲，结果主体也只渲染歌曲，因此
+真实响应只有目录项时会被错误显示为空。本切片直接补齐 All 的真实混合结果 UI，不改搜索协议或建立
+第二套结果模型。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/ui/shell.rs` | All 同时判断并渲染歌曲与目录结果，歌曲继续复用现有动作，目录进入既有 Browse |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 登记 All 混合结果真实闭环与剩余点击验收 |
+
+### 完成定义
+
+1. 默认 All 对歌曲或目录任一非空都显示真实结果，不再把目录-only 响应判为空。
+2. All 同时展示响应中的歌曲和 Album、Artist、Playlist、Podcast、Profile 等目录项；点击目录继续进入
+   既有 Browse，点击歌曲继续复用现有播放、Next、Queue、Download 和收藏链路。
+3. All 的 continuation 继续追加到同一结果；追加歌曲或目录任一有进展都不得被误判为没有结果。
+4. Songs、Videos、Albums、Artists、Community/Featured playlists、Podcasts、Episodes、Profiles 等
+   显式筛选的现有布局与请求参数保持不变。
+5. 加载、失败、空态和 Load more 保持当前页面可见，不新增搜索服务、数据库、测试或验证设施。
+6. 仅执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：默认 All 现仅在歌曲与目录均为空时显示空态，并在同一结果页先后渲染真实歌曲及 Album、
+Artist、Playlist、Podcast、Profile 等目录项；总数覆盖两类结果。歌曲继续复用现有播放、Next、
+Queue、Download 与收藏入口，目录继续进入既有 Browse。continuation 合并后的进展同时按歌曲和目录
+数量判断，目录-only 追加不会被提前截断；所有显式筛选保持原请求和布局。没有新增搜索服务、结果
+模型、数据库、测试或验证设施。
+仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
+## 已实现切片：Queue Selection and Full Queue Visibility
+
+状态：功能与 UI 已实现，待真实桌面队列批量点击验收。
+
+反向审计 Android `Queue.kt` 与 `SelectionSongsMenu.kt` 后确认，Desktop 文档把“队列选择”误记为
+已实现：当前 Queue / Up next 只有单项播放、改序和移除，没有 Android 的选择模式、全选和批量动作；
+完整播放器还从当前索引开始构造虚拟列表，直接隐藏已经播放过但仍在真实队列中的项目。本切片只补齐
+这两个 P0 队列入口，继续复用现有队列、歌单 Picker、下载和会话持久化状态机。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/ui/shell.rs` | Queue / Up next 共用 Select 状态、逐项选择/全选和批量动作；完整播放器显示完整真实队列 |
+| `PORTING_PLAN.md` / `CORE_UI_PARITY.md` | 修正此前“队列选择已完成”的误标并登记真实批量闭环 |
+
+### 完成定义
+
+1. 侧栏 Queue 与完整播放器 Up next 均有可发现的 Select 入口，并共享同一组基于真实 video ID 的选择。
+2. 选择模式可逐项选择、取消、Select all / Clear all、显示数量并退出；重复 video ID 与 Android 一样
+   作为同一选择身份处理。
+3. 非空选择可按当前队列顺序 Play、Shuffle、Add to queue、Add to local playlist、Download，以及
+   Remove selected；全部复用现有真实后端和失败显示。
+4. Remove selected 可删除任意非当前/当前组合；当前项被删时只切换并载入最终相邻项目一次，全部删空
+   时停止播放并保存空会话。
+5. Listen Together Guest 不进入选择模式或执行批量队列写操作；单项 Guest 边界保持不变。
+6. 完整播放器 Up next 显示当前项之前、当前项和未来项的完整真实队列，不再用当前索引裁掉历史项。
+7. 退出 Queue / 完整播放器、替换队列或批量动作完成后清空选择，不新增数据库、队列类型或测试设施。
+8. 只执行一次 `cargo fmt --all && cargo check --all-targets` 最小门禁。
+
+完成情况：侧栏 Queue 与完整播放器 Up next 现共用基于 video ID 的选择模式，可逐项切换、全选/
+清空、查看选择数量及退出；重复 video ID 按同一身份选择。非空选择复用现有播放、队列、本地歌单
+Picker 与下载状态机执行 Play、Shuffle、Add to queue、Add to local playlist、Download 和 Remove
+selected。批量删除以倒序移除真实索引，若包含当前项只在全部删除完成后载入一次最终相邻项，删空时
+停止播放并保存空会话。Guest 无法进入或执行选择写操作；退出相关覆盖层、替换队列和完成批量动作
+会清空选择。完整播放器不再从当前索引裁切 Up next，而是显示完整真实队列。没有新增数据库、队列
+类型、测试或验证设施。仅执行一次 `cargo fmt --all && cargo check --all-targets` 并通过，只保留既有
+`render_favorites_section` 未使用警告。
+
 ## 已实现切片：Content Language / Country
 
 状态：功能、持久化与真实 InnerTube 请求上下文已实现，待真实桌面区域内容点击验收。
