@@ -217,7 +217,7 @@ trait AudioPlayer {
 - 同步歌词和歌词滚动。
 - 播放历史、收藏和本地歌单。
 - 图片与音频缓存。
-- 恢复上次队列和播放位置。
+- 按 Persistent queue 设置决定是否恢复上次队列和播放位置。
 - 代理、音质、缓存路径和主题设置。
 - 桌面媒体键与基础通知。
 
@@ -332,21 +332,33 @@ cargo clippy --all-targets --no-deps
 - 阶段 1 播放可靠性：专用音频线程改为通过惰性工厂创建可注入 `AudioPlayer` 后端，生产环境仍使用相同 Rodio/CPAL 实现。新增 0.5 秒 AAC-LC/M4A 本地 fixture，离线覆盖加载、播放、进度推进、暂停、seek、结束、停止、音量、根因错误保留和新加载恢复；测试不需要网络或输出设备。另以可控虚拟时钟验证 12 小时会话：逐小时推进、暂停不漂移、连续 257 次 seek 的命令顺序、结尾状态和停止清理均保持一致，测试无需真实等待。
 - 阶段 2 音频输出设置：通过 Rodio 重导出的 CPAL API 枚举带稳定 `DeviceId` 的输出端点，并在设置页展示当前输出、系统默认项、刷新/切换忙碌态和独立错误状态。设备切换会先建立替代 sink，再恢复当前 source、音量、进度及播放/暂停状态，全部成功后才替换旧后端；失败会回滚并继续旧设备播放。Linux 实机验证还据此过滤了无可用输出配置的 ALSA 虚拟声道、折叠 `hw`/`plughw` 重复别名、标明 USB profile，并在系统默认项不可用时优先回退 PipeWire/PulseAudio。
 - 阶段 2 桌面媒体集成：只读参考 Android `MediaLibrarySession` 与低重要性播放通知语义，使用 Souvlaki 建立独立平台适配层（Linux MPRIS、Windows SMTC、macOS Now Playing）。系统播放、暂停、切换、停止、相对/绝对 seek、音量、唤起和退出事件全部回到既有 Shell/队列状态机；标题、歌手、封面、时长、播放态、进度和音量向系统发布，进度限制为至多每秒更新一次，每首歌只异步发送一次基础“正在播放”通知。媒体会话或通知服务不可用时仅记录降级，不影响音频播放；Linux 现在会在启动 Souvlaki 线程前探测 session D-Bus，不可用时直接禁用 MPRIS，避免第三方 zbus 后台线程因连接失败产生 panic。
-- 阶段 1 UI 闭环：搜索结果会组成播放队列并接入真实 resolver 和音频后端；底部播放器展示当前歌曲、错误、播放/暂停状态、时间、可拖动 seek 进度和音量。上一首、下一首、任意队列选中、队列侧栏和自动续播已接线。底栏与队列侧栏现均提供 Shuffle 和 Repeat 控制：Repeat 按 Android 的 Off→All→One→Off 顺序循环，One 在自然播完后重播当前项目，All 在队尾回到队首；开启 Shuffle 只随机化当前项目之后尚未播放的部分，保留历史和当前项，Repeat All 开启时新一轮会重新洗牌。房客模式统一锁定这些本地队列控制；自动电台追加的新项目会在 Shuffle 开启时只重排未播放尾部。Repeat 模式跨新队列保留，Shuffle 在显式建立新队列时安全关闭，两者均随播放会话即时持久化；播客单集的重复或回绕不会错误恢复到已保存的末尾位置。队列每项另提供带文字标签和边界禁用态的上移、下移与移除操作；改序始终保持当前歌曲身份，移除当前项会切换到相邻项目，移除最后一项会停止播放并以空会话覆盖旧队列/播放源，避免重启复活。所有编辑即时持久化并由房主状态追踪同步，房客不可操作。首页推荐/最近播放、搜索建议/结果、在线详情与播客单集、可编辑云端歌单、本地收藏/历史/歌单、远端历史和下载列表的全部逐曲入口现统一提供 Next 与 Queue：空队列会直接建立播放，有当前项时 Next 插入当前项之后且不打断播放，Queue 加入队列；显式插入允许重复歌曲，Shuffle 关闭时 Queue 位于末尾，开启时新项目参与尚未播放部分的随机顺序，tooltip 会明确提示这一差异。为避免这些次要动作在 720×520 最小窗口挤压标题，详细歌曲行已改为可换行容器，首页固定宽度卡片也按 gpui-component 的组合方式拆分为元数据区与独立可换行动作区，窄宽度下动作会自动下沉；按钮继续保留文字标签、tooltip 和明确禁用态。
+- 阶段 1 UI 闭环：搜索结果会组成播放队列并接入真实 resolver 和音频后端；底部播放器展示当前歌曲、错误、播放/暂停状态、时间、可拖动 seek 进度和音量。上一首、下一首、任意队列选中、队列侧栏和自动续播已接线。Settings 的 Autoplay 默认开启：Repeat Off 时自然播完进入下一首，关闭后停在当前歌曲；Repeat One/All 与手动 Next 不受影响。底栏与队列侧栏现均提供 Shuffle 和 Repeat 控制：Repeat 按 Android 的 Off→All→One→Off 顺序循环，One 在自然播完后重播当前项目，All 在队尾回到队首；开启 Shuffle 只随机化当前项目之后尚未播放的部分，保留历史和当前项，Repeat All 开启时新一轮会重新洗牌。普通新队列默认关闭 Shuffle，也可通过 Persistent shuffle 保留已开启的模式并随机化新队列当前项之后部分；显式 Shuffle 始终建立随机队列。Remember shuffle and repeat 默认跨重启恢复两种模式，关闭后冷启动使用 Off/Off，但保存设置不改变运行中模式。房客模式统一锁定这些本地队列控制；自动电台追加的新项目会在 Shuffle 开启时只重排未播放尾部。播客单集的重复或回绕不会错误恢复到已保存的末尾位置。队列每项另提供带文字标签和边界禁用态的上移、下移与移除操作；改序始终保持当前歌曲身份，移除当前项会切换到相邻项目，移除最后一项会停止播放并以空会话覆盖旧队列/播放源，避免重启复活。所有编辑即时持久化并由房主状态追踪同步，房客不可操作。首页推荐/最近播放、搜索建议/结果、在线详情与播客单集、可编辑云端歌单、本地收藏/历史/歌单、远端历史和下载列表的全部逐曲入口现统一提供 Next 与 Queue：空队列会直接建立播放，有当前项时 Next 插入当前项之后且不打断播放，Queue 加入队列；显式插入允许重复歌曲，Shuffle 关闭时 Queue 位于末尾，开启时新项目参与尚未播放部分的随机顺序，tooltip 会明确提示这一差异。为避免这些次要动作在 720×520 最小窗口挤压标题，详细歌曲行已改为可换行容器，首页固定宽度卡片也按 gpui-component 的组合方式拆分为元数据区与独立可换行动作区，窄宽度下动作会自动下沉；按钮继续保留文字标签、tooltip 和明确禁用态。
+- 阶段 1 播放错误自动跳过：Settings 默认在既有离线修复与一次网络播放源刷新均失败后停留并显示错误；开启 Auto skip on playback error 后，终态失败复用现有 Next、Shuffle、Repeat All 和真实播放解析进入下一首。连续两首失败允许继续跳过，第三首失败停止并保留错误，任一歌曲成功进入播放或已准备暂停状态后清零；无下一首和 Listen Together Guest 不受影响。
+- 阶段 1 原始集合优先 Shuffle：Settings 默认继续把全部尚未播放歌曲混合随机；开启 Shuffle playlist or album first 后，队列记录新建/恢复时的原始集合边界，并分别随机原始待播与后来 Add to queue/Automatic radio 内容。当前仍在原始集合时，新增内容始终排在原始待播之后；进入新增部分后只随机剩余新增歌曲，Repeat All 新一轮重新分组随机。Play next、当前歌曲、已播放历史和 Guest 同步不受影响。
+- 阶段 1 静音暂停：Settings 的 Pause music when muted 默认关闭；开启后应用音量滑杆与桌面媒体 SetVolume 共用本地音量入口，播放中归零会暂停并标记来源，恢复正音量时只继续该静音造成的暂停。原本已暂停的歌曲不会被唤醒，用户手动 Play/Pause/Stop 或选择新歌曲会取消自动恢复；冷启动音量恢复、服务热替换和 Listen Together Guest 的房主音量同步继续只设置增益。
+- 阶段 1 渐进封面 Seek：完整播放器封面左右半区双击分别复用现有播放 seek 快退/快进，默认每次 5 秒；Settings 开启 Progressive seek 后，一秒内连续双击按 5、10、15…秒递增，间隔超时或关闭设置恢复 5 秒。目标位置继续由现有时长裁剪并保存会话，完整播放器原位显示本次方向和秒数，Listen Together Guest 不挂载该手势。
+- 阶段 1 Skip silence：Settings 将 Android 的 Skip silence 与仅在其开启时可选的 Instant skip 分别持久化，默认均关闭。Rodio 解码器后新增按完整 PCM frame 检查所有声道的近静音源：保留开头 150 ms，普通模式随后以 20% frame 保留率压缩持续静音，Instant 模式在连续输入静音达到 2 秒后直接丢弃剩余静音直到有声 frame。丢弃的原始 frame 数会换算为媒体时间并叠加到现有变速位置，因此进度、歌词、历史、Last.fm、Discord、会话保存与 Sleep Timer 继续对齐原始时间轴；seek 会重置累计值，服务热替换、输出切换、音量标准化、EQ、变速、缓存及离线来源仍走同一音频链。
+- 阶段 1 Crossfade：Settings 对照 Android 持久化默认关闭的 Crossfade、1–15 秒时长（默认 5 秒）和默认开启的 Gapless albums。自然播放进入末尾窗口且现有 Repeat/Autoplay 队列状态存在目标时，Shell 提前选择下一首并复用真实播放源解析；Rodio 在同一输出 mixer 上保留旧 Player、从零启动新 Player，以新歌曲媒体位置驱动二次曲线重叠淡出/淡入，变速时实际墙钟时长随速度缩放。UI、歌词、历史、Last.fm、Discord、桌面媒体与会话在重叠开始时切到新歌曲；暂停/继续和逻辑音量同时作用于两路，Sleep Timer 临时乘数继续叠加。相同真实 Album ID 且 Gapless 开启、Episode、Listen Together Guest、等待曲末的 Sleep Timer、Autoplay 关闭或队尾无目标时不提前切歌；下一首失败沿用现有刷新、错误显示与自动跳过流程，没有增加预取服务或第二套音频服务。
+- 阶段 1 内容语言与国家/地区：Settings 对照 Android `ContentSettings.kt` 提供两个可滚动下拉入口，分别保存跟随系统或 Android 当前支持的完整 YouTube Music 语言、国家/地区代码。跟随系统通过跨平台系统 locale 匹配支持项，不可识别时回退 `en/US`；显式设置直接成为现有 `InnerTubeSession` 的 `hl/gl`。保存继续复用原服务热替换，Home、Explore、当前 Search、账号检查与后续 Browse/Radio/账号资料库请求随即共用新上下文；未保存 draft 不影响活动客户端，没有复制请求或建立区域服务。
+- 阶段 1 Sleep Timer 结束行为：Settings 将 Android 的 Finish current song 与 Fade out 分别持久化，默认均关闭。分钟定时器到点可立即暂停，也可在到点时转为当前歌曲结束状态并阻止进入队列下一首；直接 End of song 继续使用同一状态。淡出只在真正停止前最后 60 秒线性调整音频线程的临时输出乘数，等待曲末模式在分钟到点前保持完整音量；用户音量、滑杆、静音暂停、桌面媒体音量同步和会话保存始终使用未衰减的逻辑音量，取消或完成定时器立即恢复完整输出。Listen Together Guest 继续不能修改定时器，没有增加第二套播放器或计时任务。
+- 阶段 1 收藏后自动下载：Settings 的 Auto-download on like 默认关闭；开启后，普通歌曲成功加入本地 Favorites 才复用现有持久下载记录、三路并发队列和当前音质开始离线下载。取消收藏不删除已有离线文件，Episode 继续只切换 Episodes for Later，收藏写入失败不下载；再次收藏已完成、活动或已排队的同音质歌曲由原下载入口去重，下载失败继续显示在既有下载状态和重试入口。
+- 阶段 1 自动 Radio 队列：Settings 将 Android 的 Auto radio queue、Similar content 与 Auto load more 拆成三个默认开启的行为。从 Search 结果/建议或 Home 的普通歌曲卡片、Speed Dial、Recent、Quick picks、Daily Discover 等单曲入口点击时，开启 Auto radio queue 会先播放所选歌曲并立即复用真实 `next` Radio 请求替换未来队列；关闭后严格建立该单曲队列并禁止它立即触发 Similar content。Home/Search 的 Play all、显式 Radio、Next、Queue 及 YouTube URL 直达保持原行为；其他普通合格队列接近末尾时由 Similar content 决定是否请求首个推荐页，已有 Radio 只在 Auto load more 开启时自动请求 continuation，两者继续受 Repeat All 限制。
 - 阶段 1 缓存与恢复：Range 块以稳定 `video_id + audio quality + content length + byte offset` 落入系统缓存目录，默认容量 512 MiB，完整块才能命中，损坏块会失效，超限时按最近访问时间淘汰旧块；不同音质使用独立 namespace，缓存文件名不含播放签名 URL。同一缓存实例的读取、原子提交和容量淘汰已串行化，写入使用进程内唯一的 `create_new` 临时文件、`fsync` 和 rename，避免并发写同一块或读/淘汰竞态留下半块和临时文件。cache-only 播放会先逐块核对完整资源，完整缓存可在全新进程中断网读取且不发 HTTP 请求，任一缺块则立即请求刷新播放源；已知长度的截断 206 响应会以 `UnexpectedEof` 拒绝且不落盘。播放期间的 HTTP 403/410 和其他 Range 读取失败会从 Rodio/Symphonia 数据源显式回传到 Shell，不再被误判为自然播完；刷新会保留失败位置并重新解析一次 visitor data 和直链，仍失败才保留错误供手动重试。
-- 阶段 2 存储基线：建立桌面独立 SQLite v23 schema 和迁移检查，包含歌曲及播客单集身份、播放历史、识曲历史、搜索历史、队列项、单例播放会话及 Shuffle/Repeat 模式、当前播放缓存元数据、收藏、本地歌单、有序歌单项、播客收藏及取消墓碑、Episodes for Later、逐集播放位置、规范化歌词文档/行、单例应用设置、离线下载状态和参数均衡器档案；v1 至 v22 数据库会原位升级并保留已有数据，程序拒绝比当前版本更新的 schema。v18→v19 增加 Repeat/Shuffle 会话状态，v19→v20 增加识曲历史，v20→v21 增加搜索历史，v21→v22 增加本地 Album/Artist 目录，v22→v23 增加真实 song→album 映射。数据库运行在专用线程，通过异步回复与 GPUI 交互，不读取或复用 Android Room 文件。
-- 阶段 2 历史、统计与恢复：实际播放满 30 秒后写入本地历史。对照 Android `HistoryScreen`，侧栏提供独立 History 入口：Local 与已登录 YouTube Music 历史可切换并按标题/歌手过滤，本地记录可单删或确认清空，远端按 feedback token 精确删除；两者都复用播放、Next、Queue 和 Download。Library Overview 仍保留历史区，但不再是唯一入口。对照 Android `StatsScreen`，侧栏 Stats 按 7 天、30 天、3/6 个月、1 年或全部时间聚合 `play_history.play_time_ms`，展示总览、Top Songs、Top Artists 和 Top Albums；歌曲接入播放操作，真实歌手/专辑 ID 可进入详情。队列与当前播放状态定期保存；冷启动异步恢复但不会擅自播放。
+- 阶段 2 存储基线：建立桌面独立 SQLite v45 schema 和迁移检查，包含歌曲及播客单集身份、播放历史、识曲历史、搜索历史、队列项、单例播放会话及 Shuffle/Repeat 模式、当前播放缓存元数据、收藏、Song/Browse/Local Playlist Speed Dial、本地歌单及自定义封面、有序歌单项、播客收藏及取消墓碑、Episodes for Later、逐集播放位置、规范化歌词文档/行、单例应用设置、离线下载状态和参数均衡器档案；v1 至 v44 数据库会原位升级并保留已有数据，程序拒绝比当前版本更新的 schema。v18→v19 增加 Repeat/Shuffle 会话状态，v19→v20 增加识曲历史，v20→v21 增加搜索历史，v21→v22 增加本地 Album/Artist 目录，v22→v23 增加真实 song→album 映射，v23→v24 增加 Song Speed Dial，v24→v25 增加 Album/Artist/Playlist/Podcast Browse Speed Dial，v25→v26 增加随本地歌单删除级联的 Local Playlist Speed Dial，v26→v27 增加本地歌单自定义封面 URI，v27→v28 增加暂停本地收听与搜索历史设置，v28→v29 增加 1–100 秒播放历史时长，v29→v30 增加队列持久化设置，v30→v31 增加 Autoplay，v31→v32 增加跨队列保留 Shuffle 与跨重启记住 Shuffle/Repeat，v32→v33 增加 Repeat All 时停止自动补充，v33→v34 增加防止显式入队重复歌曲设置，v34→v35 增加播放错误自动跳过设置，v35→v36 增加优先随机原始播放列表/专辑设置，v36→v37 增加静音暂停设置，v37→v38 增加渐进封面 seek 设置，v38→v39 增加收藏后自动下载设置，v39→v40 增加自动 Radio 队列设置，v40→v41 增加 Radio 自动翻页设置，v41→v42 增加 Sleep Timer 曲末与淡出设置，v42→v43 增加 Skip silence 与 Instant skip 设置，v43→v44 增加 Crossfade、时长与 Gapless albums 设置，v44→v45 增加内容语言与国家/地区设置。数据库运行在专用线程，通过异步回复与 GPUI 交互，不读取或复用 Android Room 文件。
+- 阶段 2 历史、统计与恢复：累计实际播放达到 Settings 保存的 1–100 秒门槛后写入本地历史，默认与 Android 一致为 30 秒。对照 Android `HistoryScreen`，侧栏提供独立 History 入口：Local 与已登录 YouTube Music 历史可切换并按标题/歌手过滤，本地记录可单删或确认清空，远端按 feedback token 精确删除；两者都复用播放、Next、Queue 和 Download。Library Overview 仍保留历史区，但不再是唯一入口。对照 Android `StatsScreen`，侧栏 Stats 按 7 天、30 天、3/6 个月、1 年或全部时间聚合 `play_history.play_time_ms`，展示总览、Top Songs、Top Artists 和 Top Albums；歌曲接入播放操作，真实歌手/专辑 ID 可进入详情。队列与当前播放状态定期保存；Persistent queue 开启时冷启动异步恢复且不会擅自播放，关闭时只恢复音量与 Repeat/Shuffle，不恢复歌曲、队列、位置或播放源。
 - 阶段 2 收藏与本地歌单：搜索结果可收藏或取消收藏，并可从侧栏选择目标歌单；资料库支持创建、打开、播放、移除歌曲和删除本地歌单。收藏与歌单均通过专用存储线程持久化，歌单内歌曲保持插入顺序且重复添加幂等。
 - 阶段 2 资料库管理：只读对照 Android 的隐私设置、歌单页和 `PlaylistSortType` 语义，新增只清除 `play_history` 的历史清理操作，收藏、歌曲元数据和本地歌单不受影响；清空历史和删除歌单均使用带取消按钮、不可点击背景关闭的危险操作确认框。歌单详情支持预填原名的重命名并校验空名、大小写不敏感重名与已删除歌单；列表支持按创建时间、名称、歌曲数、最近更新排序及升降序切换，默认与 Android 一致为创建时间降序。所有资料库写操作共用明确的忙碌态，失败会保留现有内容并在当前页面回显。收藏、歌单、本地历史、下载、已存播客或 Episodes for Later 的初始读取若有任一分区失败，资料库页现在提供统一恢复入口，只把失败分区切回加载态并分别重读；正常分区不被清空，重试期间的播客写入或远端同步通过修订号阻止旧读取结果覆盖新状态。
 - 阶段 2 首页与探索：主页接入真实的最近播放去重列表；冷启动恢复出当前歌曲时会显示继续播放入口，并沿用已保存的播放位置，不会自动出声。匿名 `FEmusic_home` 推荐现按 carousel shelf 展示，支持 chip 筛选、混合歌曲/专辑/歌手/歌单项目、按 shelf 播放、更多详情、continuation 追加、跨页去重和失败原位重试；探索路由通过 `FEmusic_explore` 展示新发行专辑及带原始 `params` 的心情/流派入口。两页复用现有详情和缩略图管线，未知或残缺 renderer 只跳过对应项目。三份固定 Home/continuation/Explore fixture 与真实匿名 Home/Explore 并发请求均已通过。
 - 阶段 2 同步歌词：只读对照 Android 的 provider、LRCLIB 匹配和播放器时间轴语义，新增独立 `LyricsClient` 与稳定 `LyricsDocument`/`LyricsLine` 模型。LRCLIB 查询会清理标题噪声、提取主艺术家、依次尝试元数据/标题/自由文本策略，已知时长允许 ±5 秒并优先同步结果；LRC 解析支持 BOM、元数据、正负 offset、百分秒/毫秒、逗号小数、多时间标签和基础 HTML 实体，纯文本结果明确降级。歌词侧栏按需加载，具有加载、无匹配、失败和重试状态；当前行带 100 ms 提前量随播放位置更新并自动滚动，同步行可点击 seek。切歌会取消旧任务并再次核对 `video_id`，旧响应不能覆盖新歌。SQLite v4 规范化缓存同步/纯文本行，重启优先离线命中，手动 Refresh 才绕过缓存；混合、空白或乱序时间线会被拒绝。固定 LRCLIB JSON、解析/匹配/Unicode/竞态/缓存测试和不输出正文的真实 LRCLIB 请求均已通过。
 - 阶段 2 在线详情：搜索页增加歌曲、专辑、艺术家和公共歌单四类筛选，保留 `browseId` 并通过统一匿名 `browse` 请求打开详情。专辑曲目、艺术家热门歌曲、在线歌单曲目、描述和关联专辑/歌单均由宽松解析器转换；详情页支持整页或单曲播放、收藏以及加入本地歌单，请求切换和返回会取消过期任务。搜索和详情现可用 `continuation`/`ctoken` 增量加载后续歌曲或目录项，兼容 shelf continuation 与 append action 等响应容器；跨页按 `videoId`/`browseId` 去重，空页、无进展页和重复 token 会停止，追加失败保留已有内容并原位重试。六份目录固定 JSON fixture 与真实三类目录搜索、详情及 continuation 请求均已通过。
 - 阶段 2 图片加载：歌曲、专辑、艺术家、歌单详情和底部播放器已显示真实缩略图；每个 URL 使用可取消的 GPUI 后台任务，切换查询、详情或路由时立即丢弃不再可见的请求，加载中和网络/解码失败都有明确占位。解码源在内存中最多保留 256 张；原始图片使用独立的 256 MiB 磁盘 LRU 缓存，文件名只含 URL 的稳定 128 位散列，文档校验格式、长度、内容散列和实际可解码性，损坏时删除并回源。离线测试覆盖冷启动磁盘命中、损坏剔除和容量淘汰，真实 YouTube JPEG 下载与解码也已通过。
-- 阶段 2 日常设置：只读对照 Android 的 HTTP/SOCKS 代理及 Auto/Low/High 音质语义，新增强类型 `AppSettings`、SQLite 单例持久化（当前 schema v19）和完整设置页。应用会在任何首页网络请求前读取设置；代理（含遮罩认证字段）统一作用于 InnerTube、LRCLIB、缩略图、音频 Range 和 Last.fm 客户端，固定本地代理测试已证明请求实际经过代理而不只是保存配置。Low 选择不高于 128 kbps 的最佳直连 AAC，High 优先服务端高质量标记，Auto 选择最高码率；切换音质会清除当前安全源元数据、按新音质重新解析并保留进度和播放/暂停状态。缓存根目录、音频容量、音量标准化级别、十段/参数均衡器、播放速度/移调模式、自动电台、YouTube Music 播放历史同步、Last.fm 行为、Discord Rich Presence 开关、“一起听”服务器/显示名/自动审批/房主音量同步和主题均可持久化；自定义根目录同时承载 `audio`/`thumbnails` 子缓存。保存会先验证代理 URL、绝对且非文件系统根的缓存路径、容量、Last.fm 阈值以及无凭据的 `ws://`/`wss://` 房间服务器，再在后台完整构造新服务并写库，任一步失败都保留旧服务；成功后才原子替换，旧音频线程也在后台退出，避免阻塞 GPUI；活动下载期间要求先暂停再应用网络或缓存设置，房间内也禁止切换服务器，避免两个服务实例并发操作同一持久目录或会话。
-- 阶段 2 自动电台：只读对照 Android `YouTubeQueue`、`MusicService.startRadioSeamlessly` 和队列恢复语义，匿名调用 InnerTube `next`，完整携带 `videoId`、`playlistId`、`playlistSetVideoId`、`params`、`index` 与 continuation。歌曲电台优先请求 `RDAMVM{videoId}`，空电台回退单 `videoId`，仍无推荐时再使用 Related 页面；每段最多尝试 4 次，并兼容 automix preview、playlist panel continuation、selected index 和残缺 renderer。播放至队尾五首以内会自动补充，跨页按 `videoId` 去重，重复 token、空 token 或续页无进展会停止；新队列和服务切换使用代际号取消旧响应，失败保留现有队列并在队列侧栏提供重试。播放器与队列侧栏均可手动从当前歌曲启动无缝电台，请求成功后才裁掉未来旧项目。SQLite 只持久化已经入队的歌曲，不保存临时 endpoint/continuation，重启恢复后不会擅自播放；这与 Android 将持久化 YouTube 队列降级为普通列表的行为一致。
+- 阶段 2 日常设置：只读对照 Android 的 HTTP/SOCKS 代理及 Auto/Low/High 音质语义，新增强类型 `AppSettings`、SQLite 单例持久化（当前 schema v45）和完整设置页。应用会在任何首页网络请求前读取设置；代理（含遮罩认证字段）统一作用于 InnerTube、LRCLIB、缩略图、音频 Range 和 Last.fm 客户端，固定本地代理测试已证明请求实际经过代理而不只是保存配置。Low 选择不高于 128 kbps 的最佳直连 AAC，High 优先服务端高质量标记，Auto 选择最高码率；切换音质会清除当前安全源元数据、按新音质重新解析并保留进度和播放/暂停状态。内容语言与国家/地区、缓存根目录、音频容量、音量标准化级别、静音暂停、渐进封面 seek、Skip silence/Instant skip、Crossfade/时长/Gapless albums、Sleep Timer 曲末/淡出、收藏后自动下载、自动 Radio 队列、Similar content、Auto load more、十段/参数均衡器、播放速度/移调模式、Repeat All 自动补充、队列持久化、Autoplay、播放错误自动跳过、跨队列 Shuffle、优先随机原始播放列表/专辑、跨重启 Shuffle/Repeat、防止显式入队重复歌曲、1–100 秒播放历史时长、本地收听/搜索历史暂停、YouTube Music 播放历史同步、Last.fm 行为、Discord Rich Presence 开关、“一起听”服务器/显示名/自动审批/房主音量同步和主题均可持久化；自定义根目录同时承载 `audio`/`thumbnails` 子缓存。保存会先验证代理 URL、内容 locale、绝对且非文件系统根的缓存路径、容量、Crossfade 时长、Last.fm 阈值以及无凭据的 `ws://`/`wss://` 房间服务器，再在后台完整构造新服务并写库，任一步失败都保留旧服务；成功后才原子替换，旧音频线程也在后台退出，避免阻塞 GPUI；活动下载期间要求先暂停再应用网络或缓存设置，房间内也禁止切换服务器，避免两个服务实例并发操作同一持久目录或会话。
+- 阶段 2 隐私历史控制：只读对照 Android `PrivacySettings.kt`，Settings 现提供 Pause listening history 与 Pause search history。前者只跳过新的本地 `play_history` 与累计播放统计，既有历史及资料库数据保留，YouTube Music 远端注册仍由原同步开关独立控制；后者只跳过本地搜索记录，查询、建议、链接直达和结果页继续工作。两项均随 `AppSettings` 保存并跨重启恢复。同一 Privacy history 卡片另直接提供 Clear listening history 与 Clear search history，复用 History/Search 已有确认框、SQLite 清空任务及内存空态，并在 Settings 显示进行中、成功或业务失败；收藏、歌单、队列、下载及远端历史不受影响。没有实现 Android 专属截图限制、增加平行历史服务或复制清理后端。
+- 阶段 2 存储清理：只读对照 Android `StorageSettings.kt`，Settings 现直接提供 Clear playback cache、Clear artwork cache 与 Remove all downloads。两项缓存操作分别复用现有音频块缓存和缩略图缓存目录，图片清理后同步释放内存图片并重新请求当前可见封面，本地 `file:` 自定义封面和 SQLite 数据不受影响；全部下载清理逐项复用既有取消、资源删除及 SQLite 下载记录状态机。三项操作均有确认框及进行中、成功和失败状态，没有增加平行清理服务或缓存扫描 UI。
+- 阶段 2 自动电台：只读对照 Android `YouTubeQueue`、`MusicService.startRadioSeamlessly` 和队列恢复语义，匿名调用 InnerTube `next`，完整携带 `videoId`、`playlistId`、`playlistSetVideoId`、`params`、`index` 与 continuation。歌曲电台优先请求 `RDAMVM{videoId}`，空电台回退单 `videoId`，仍无推荐时再使用 Related 页面；每段最多尝试 4 次，并兼容 automix preview、playlist panel continuation、selected index 和残缺 renderer。普通合格队列播放至队尾五首以内时由 Similar content 决定是否请求首个推荐页；已有 Radio 的 continuation 由独立 Auto load more 设置控制，默认开启，关闭后当前页面仍继续播放但不再自动翻页。跨页按 `videoId` 去重，重复 token、空 token 或续页无进展会停止；Settings 可按 Android 语义在 Repeat All 时阻止新的自动初始页与 continuation，且不影响手动 Radio 或已发出的请求。新队列和服务切换使用代际号取消旧响应，失败保留现有队列并在队列侧栏提供重试。播放器与队列侧栏均可手动从当前歌曲启动无缝电台，请求成功后才裁掉未来旧项目；侧栏 Queue 与完整播放器 Up next 的共用行还可从任意非单集歌曲启动 Radio，非当前项先成为新队列首项并开始播放，再以其真实 video ID 进入同一请求、continuation、失败和重试状态机，Listen Together Guest 与同 seed 加载中禁用。SQLite 只持久化已经入队的歌曲，不保存临时 endpoint/continuation，重启恢复后不会擅自播放；这与 Android 将持久化 YouTube 队列降级为普通列表的行为一致。
 - 阶段 3 账号基础：只读对照 Android 的 Cookie 模板、`SAPISIDHASH`、`dataSyncId` 和 `account/account_menu` 行为，支持直接 Cookie header 与 Android session 模板导入；输入长度、控制字符和 `SAPISID` 均在联网前校验，SHA-1 签名按请求时间动态生成，临时明文和 session 析构时主动清零，`Debug`、协议错误与测试输出均不暴露 Cookie。普通搜索即使存在 session 仍保持匿名；需要账号的 browse、continuation、next 与账号探测才携带登录头和 `onBehalfOfUser`。导入流程先探测账号、后写系统凭据库，失败保留旧 session；启动会恢复并重新探测，退出先删除系统凭据再切回匿名，并明确保留本地收藏、歌单、历史和缓存。设置页提供遮罩输入、账号头像/名称、重试、替换和带确认的退出操作；凭据库不可用时仅匿名降级，绝不回退到 SQLite 或明文文件。
 - 阶段 3 云端资料库与写同步：账号验证成功后并发读取 `FEmusic_liked_videos` 与 `FEmusic_liked_playlists`，每个端点跟随最多 64 页 continuation，按稳定 ID 去重并在重复 token 或无进展时安全停止。资料库页具有未登录、加载、成功、失败和原位重试状态；喜欢的歌曲可直接播放，在线歌单复用既有详情页。只读对照 Android InnerTube 请求后，现已支持歌曲和公共歌单的喜欢/取消喜欢、艺术家订阅/取消订阅，以及私有在线歌单的创建、加歌、按 `setVideoId` 精确移除重复曲目、改名和远端删除。喜欢与订阅是目标状态幂等写入，网络失败、429 或 5xx 最多重试 3 次；创建和歌单编辑等结果不确定的写入只发送一次，并要求刷新确认后再试。UI 对喜欢、订阅、移歌、改名和删除使用乐观状态，失败精确回滚；401/403 会进入账号失效提示。云端数据仍不复制进本地 SQLite，远端删除也明确不影响本地收藏、歌单、历史和缓存。
-- 阶段 3 云端播放历史：只读对照 Android `FEmusic_history`、`REMOVE_FROM_HISTORY` feedback 和 30 秒后注册 `videostatsPlaybackUrl` 的行为，认证读取按远端 shelf 标题保留日期分组，并跟随最多 64 页 continuation。同一首歌的不同反馈 token 视为不同播放记录，重放不会被 `videoId` 去重；重复页则按 token 停止。资料库用 Local/YouTube Music 两个来源页签明确隔离：本地清空只删 SQLite，远端单条移除只提交对应 feedback token，失败乐观回滚，任何远端历史都不复制进本地库。累计实际播放 30 秒后仍照常并行写本地历史；登录且持久化开关开启时，另以同一 16 字符 `cpn` 注册一次远端播放，网络失败、429 或 5xx 最多重试 3 次。跟踪 URL 仅接受 HTTPS 的 YouTube playback 精确路径，所有跟踪 URL 与 feedback token 都只驻留内存并在 `Debug` 中遮罩；401/403 进入账号失效提示。匿名真实 `player` 已证明当前 visionOS 响应提供受信跟踪端点，但未使用真实账号执行历史读取、注册或删除，避免未经确认改动用户资料。
+- 阶段 3 云端播放历史：只读对照 Android `FEmusic_history`、`REMOVE_FROM_HISTORY` feedback 和可配置 History duration 后注册 `videostatsPlaybackUrl` 的行为，认证读取按远端 shelf 标题保留日期分组，并跟随最多 64 页 continuation。同一首歌的不同反馈 token 视为不同播放记录，重放不会被 `videoId` 去重；重复页则按 token 停止。资料库用 Local/YouTube Music 两个来源页签明确隔离：本地清空只删 SQLite，远端单条移除只提交对应 feedback token，失败乐观回滚，任何远端历史都不复制进本地库。累计实际播放达到 Settings 保存的 1–100 秒门槛后并行处理本地历史；登录且持久化开关开启时，另以同一 16 字符 `cpn` 注册一次远端播放，网络失败、429 或 5xx 最多重试 3 次。跟踪 URL 仅接受 HTTPS 的 YouTube playback 精确路径，所有跟踪 URL 与 feedback token 都只驻留内存并在 `Debug` 中遮罩；401/403 进入账号失效提示。匿名真实 `player` 已证明当前 visionOS 响应提供受信跟踪端点，但未使用真实账号执行历史读取、注册或删除，避免未经确认改动用户资料。
 - 阶段 3 账号失效恢复：Cookie 导入校验、远端 401/403/无活动账号和系统凭据库故障现分别使用 `Credential`、`SessionExpired` 与 `CredentialStore` 强类型错误。只有持有 session 且账号探测成功的 `SignedIn` 状态可以读取或修改云端资料库、历史、喜欢、订阅和在线歌单；一旦远端拒绝，应用保留系统凭据供重试、替换或显式删除，但立即切换到匿名客户端、关闭云端歌单选择器、切回本地历史并停止远端历史上报。网络等非认证失败仍只作用于当前请求，不会误判为账号过期。设置页为过期状态提供独立说明、重新验证、替换和删除过期 session；退出不会自动删除本地数据。平台凭据测试为每次运行生成独立 service/account，并用清理守卫验证空条目、保存、恢复、删除和再次为空，绝不访问生产条目；Linux Secret Service 实机已通过，Windows Credential Manager 与 macOS Keychain 保留同一测试入口等待对应平台执行。
 - 阶段 4 离线下载：只读对照 Android `DownloadUtil`、`ExoDownloadService` 和自动下载语义，建立与 512 MiB 播放 LRU 缓存完全分离的持久下载目录；显式下载不会被缓存淘汰。下载先解析当前音质的短期播放地址，按稳定 `video_id + quality + content length` 身份写入 512 KiB 原子块，可复用播放器缓存，最多并行 3 首，支持排队、暂停、断点续传、失败重试和精确删除。只有全部块齐全、持久进度达到总长度且 AAC/M4A 媒体探测成功后，SQLite 才允许进入 Completed；坏的完整文件会被丢弃，启动会核对磁盘并自动续传此前 Queued/Downloading 项，运行中离线读取失败也会降级为可修复状态。首页、搜索、在线详情、收藏、历史、本地歌单及云端歌单均提供统一下载状态入口，资料库集中展示进度、离线播放、暂停/恢复、Play all 和带确认的删除；删除只影响本机离线副本。离线播放优先命中持久下载，即使播放缓存被淘汰或临时 URL 过期也不发网络请求；下载线程与 GPUI/异步执行器隔离，错误与调试输出不暴露完整 URL。
 - 阶段 4 音量标准化：只读对照 Android `VolumeNormalizationAudioProcessor`、`MusicService` 和响度级别偏好，优先读取 `perceptualLoudnessDb`，否则将相对 `loudnessDb` 换算为实测 LUFS；Aggressive/Loud/Balanced/Quiet 分别以 −7/−11/−14/−19 LUFS 为目标，默认启用 Balanced。Rodio 解码样本进入播放器前按 `10^(gain_mB/2000)` 独立增益，目标差值限制在 −15 dB 至 +3 dB，并把输出硬限幅到 −1…1；用户音量仍由独立播放器音量控制。当前增益进入播放快照和底栏提示，设置保存、音频服务重建、输出设备切换、过期源缓存恢复及显式离线下载都会保留响度元数据；SQLite v9 仅保存有界整数响度，不保存临时播放地址。fixture、DSP、seek、下载传递、会话往返和 v8→v9 无损迁移测试已覆盖，真实匿名完整下载也确认当前 visionOS 响应携带响度元数据。
@@ -396,10 +408,58 @@ cargo run --bin metrolist
 完整播放器移植进度：底栏当前歌曲现可展开完整播放器并返回；封面、标题、作者、真实播放控制、
 进度和音量均接入现有播放器状态。Up next、Lyrics、Related 三个标签分别复用现有队列、歌词和
 Radio 后端，支持队列选择/改序/移除/清空、歌词加载/重试/同步行 seek，以及相关推荐的
-Play/Next/Queue；当前歌曲还可直接 Favorite、加入本地歌单、YT Like、加入云端歌单、订阅首位
-真实 Artist，并打开真实 Artist/Album 详情，订阅失败会回滚详情与 Library Artists。切歌时歌词和
+Play/Next/Queue；当前普通歌曲还可直接 Favorite、加入本地歌单、YT Like、加入云端歌单、订阅首位
+真实 Artist，并打开所有带真实 ID 的 Artist 及真实 Album 详情，订阅失败会回滚详情与 Library
+Artists。从完整播放器打开本地或云端歌单 Picker 会先退出覆盖层并立即显示既有侧栏，不改变当前
+播放或队列。账号 Library Songs 可用时另显示 Add/Remove from Library；写入前按 Android 同源行为
+用登录态 `/next` 读取同一 video ID 的最新 BOOKMARK/LIBRARY feedback token，再提交认证 feedback，
+UI 乐观更新并在失败时回滚。Episode 的心形动作在完整和迷你播放器均切换现有 Episodes for Later，
+本地/账号同步成功或失败直接可见，不再误写歌曲 Favorite。多位 Artist 直接按名字选择入口，不再只
+暴露第一位；当前歌曲还可按真实 video ID 复用
+`music/get_queue` 请求刷新标题、Artist、Album、时长与封面且不中断音频。切歌时歌词和
 Related 状态按当前 `video_id`/Radio seed 隔离。代码闭环已完成，
 仍待一次真实桌面人工点击验收，因此不标记为“核心 UI 闭环完成”。
+
+完整播放器 Up next 现直接接入既有 Sleep Timer：显示实时剩余状态，可按 Android 相同边界以
+5 分钟步进选择 5–120 分钟，也保留 15、30、60 分钟预设、当前歌曲自然结束和取消。Deadline
+可按持久设置立即暂停真实音频或转为当前歌曲结束后停止，End of song 会阻止队列自动前进；开启
+Fade out 后只在真正停止前最后 60 秒通过临时输出乘数线性淡出，不改变滑杆或保存音量，取消和完成
+会恢复完整输出。完整播放器与侧栏 Queue 共享同一选择值和计时状态，Listen Together Guest 不能
+修改。自动日程仍未移植，也没有增加第二套播放器或计时服务。
+
+完整播放器另对照 `PlayerMenu.kt` 增加 EQ 标签：直接显示 Off、十段预设、自定义十段或真实
+AutoEQ/APO 档案名；Off、Bass、Vocal、Treble 点击复用现有即时音频链重建、SQLite 保存和失败
+回滚状态机，Applying、成功及失败原位可见。完整导入、档案选择和十段编辑继续由既有 Settings
+提供，EQ 标签可直接进入，不增加音频后端、数据库表或平行 Equalizer 状态。
+
+Mini Player 继续对照 Android 新版底栏补齐当前歌曲直接动作：紧凑 Favorite 对普通歌曲调用现有
+SQLite 收藏状态机，对 Episode 则调用 Episodes for Later；Add to playlist 打开既有本地选择器，账号资料库已加载且首位 Artist 有真实 ID 时
+Subscribe 调用现有云端订阅、Library Artists 乐观同步及失败回滚。动作与播放/进度/音量、
+Radio、Lyrics、Queue 分组布局，失败信息直接显示在当前歌曲副标题。
+
+完整播放器继续对照 Android `PlayerMenu.kt` 补齐当前歌曲离线生命周期：没有记录时进入现有持久
+下载队列，Queued/Downloading 可暂停，Paused/Failed 可断点恢复，Completed 可通过既有确认框
+精确移除离线副本。加载、暂停中、移除中禁止重复动作，下载错误直接显示；没有新增下载存储、
+调度器或平行状态。
+
+完整播放器另补齐 Android `PlayerMenu.kt` 的 Copy link 与 Details：标准
+`https://music.youtube.com/watch?v=<video_id>` 通过 GPUI 原生剪贴板写入并显示成功提示；Details
+先展示现有 Song 的标题、Artists、Album、类型、时长、Video ID、链接及 AudioDownload 状态，同时
+按 Android `ShowMediaInfo` 使用 WEB `/next` 读取真实作者频道、上传日期、订阅数与描述，并读取
+Return YouTube Dislike 的公开 Views/Likes/Dislikes。加载、失败、重试和成功内容原位可见，每个值
+可复制；响应只保留在当前详情 UI，不写入 SQLite 或建立统计缓存。
+
+待播队列继续对照 Android `QueueMenu.kt`：侧栏 Queue 与完整播放器 Up next 的共用歌曲行现可在
+不切换当前播放项的情况下 Favorite、打开本地歌单选择器、执行 Download/Pause/Resume/Remove
+offline，并复制标准 YouTube Music 链接。原有 Play、Up、Down、Remove 与 Listen Together Guest
+限制保持独立；每行还可打开歌曲所有带真实 ID 的 Artist 及真实 Album，退出 Queue/完整播放器覆盖
+层后复用既有 Browse 页面且不中断播放。每行的 Refresh 直接调用 Android 同源 `music/get_queue` 请求和队列歌曲解析，
+成功后更新队列中同 video ID 的 Song 及当前播放器并随会话落库，失败直接显示；Guest 不改写房主
+同步的队列。任意行的 Details 另打开共用侧栏并请求同一套实时 MediaInfo，退出完整播放器覆盖层但
+不改变播放和队列。每行另复用现有 Play next / Add to queue，允许按 Android 语义主动重复插入；
+Episode 的心形动作切换本地并可账号同步的 Episodes for Later，普通歌曲才写入 Favorite。复制成功及
+收藏、播客、下载错误通过现有 UI 状态可见。账号资料库可用时，普通歌曲还可直接切换真实 YT Like
+并打开现有可编辑云端歌单 Picker；乐观回滚、加载、空数据和失败状态继续由既有云端状态机处理。
 
 Explore 对照 Android 补齐 Charts/Trending：桌面端现与 `ExploreScreen.kt` 一样并行请求
 `FEmusic_charts` 和 `FEmusic_explore`，在新发行与 Moods & genres 之前展示真实榜单歌曲；
@@ -431,6 +491,18 @@ Home 对照 Android 补齐 Quick picks：直接组合 Daily Discover 的实时�
 favorites、Keep listening 与最近播放，按 `video_id` 去重并限制为 20 首；Home 提供 Play all
 及逐曲 Play、Next、Queue、Download。该区块随已有 Shell 状态更新，不新增影子推荐表。
 
+Home 对照 Android 补齐持久 Speed Dial：完整播放器可把当前普通歌曲 Pin/Unpin；Album、Artist、
+Playlist 与 Podcast 详情可把真实 Browse 项 Pin/Unpin，Category 不显示该动作；本地歌单详情也可
+按 Android `LOCAL_PLAYLIST` 语义 Pin/Unpin。SQLite v26 保留 v24 Song 和 v25 Browse 关系，Browse
+按真实 kind、browse ID、标题、副标题、缩略图与 params 保存；Local Playlist 只保存带删除级联的
+真实本地歌单外键，重命名后读取最新名称。Home 跨启动按稳定顺序恢复：Song 可直接建立播放队列并
+提供 Next、Queue、Download，Browse 点击复用在线详情，本地歌单点击复用现有 SQLite 歌曲详情，全部
+固定项均可原位 Unpin。Loading、空数据、失败重试及写入结果均在现有界面可见；不持久化补位项，
+也不增加 Speed Dial 设置或新的推荐请求。Home 另按 Android 顺序在固定项之后以现有 Keep Listening、Quick
+Picks 去重补到最多 27 个媒体项；补位项不持久化且不显示 Unpin。可见 Randomize 卡片复用这些真实
+歌曲及当前 Home Browse 目录，有两类候选时按 80%/20% 选择，歌曲建立单曲播放队列，目录进入既有
+详情；Listen Together Guest 与无候选状态明确禁用。
+
 Search 对照 Android 补齐 Local 来源：Search 现在可在 YouTube Music 与 On this device 间明确
 切换；Local 模式不会发网络建议或搜索请求，而是实时聚合本地收藏、最近历史、下载、Episodes
 for Later，并搜索本地歌单。All/Songs/Playlists 过滤器、加载/错误/空状态均在同一页面可见；
@@ -454,6 +526,8 @@ Playlists 五类筛选，All 每类预览 3 条；本地歌曲携带的真实 ar
 均来自累计播放时长；Top Songs 可整组或随机播放，并复用逐曲队列和下载动作。InnerTube renderer
 明确提供或 Album 详情上下文确定的真实专辑身份会随 Song 写入 SQLite v23 song→album 映射；
 Top Albums 据此聚合次数与时长、显示封面并进入现有 Album 详情，不根据标题猜测专辑。
+历史、Keep listening、收藏、Episodes for Later、本地歌单、下载和冷启动队列的所有 Song 读取也会
+恢复该映射，因此从本地来源重新播放或重启后，完整播放器的真实 Album 入口不会消失。
 
 主导航对照 Android 补齐独立 History：不再要求先进入 Library；Local 与 YouTube Music
 历史共享标题/歌手过滤，保留播放、Next、Queue 和 Download。本地 SQLite 事件支持单条删除
@@ -465,7 +539,13 @@ Library 对照 Android 补齐云端 Albums / Artists：账号资料库现在与 
 
 Library 顶部现对照 `LibraryScreen.kt` 提供 Overview / Playlists / Songs / Albums / Artists /
 Podcasts 分类按钮；分类只组织现有云端与本地真实状态，详情返回时保留当前分类。Overview 继续
-集中展示下载、历史等桌面已有入口，没有为筛选复制请求或存储。
+对照 `LibraryMixScreen` 聚合账号歌单、Liked/Uploaded Albums、Library Artists、本地 Album/Artist
+目录与本地歌单；统一搜索非空时同时合并账号和设备已知歌曲。结果复用既有播放/详情链路，
+Liked、Offline、My Top、Uploaded 复用真实 Songs/Stats 来源，不复制请求或存储，也不伪造 Cached。
+Overview 下方保留现有 Downloads 管理区，避免丢失暂停、恢复、移除和离线播放入口。
+Mix 顶部另可直接调用现有账号资料库 Refresh，并在当前页展开共享输入、调用 SQLite 创建本地歌单；
+结果可按后端/SQLite 已有来源顺序或真实名称升降序排列，搜索结果按类型与名称稳定组织。由于
+BrowseItem 没有统一创建/更新时间，Desktop 不虚构 Android 的跨类型 Last updated 值。
 
 Library Songs 现对照 `LibrarySongsScreen.kt` 区分四个真实来源：Liked 从 `LM` 完整歌单加载，
 Library 从 `FEmusic_liked_videos` 加载，Uploaded 精确解析
@@ -475,8 +555,24 @@ Library 从 `FEmusic_liked_videos` 加载，Uploaded 精确解析
 
 Library Playlists 现对照 `LibraryPlaylistsScreen.kt` 增加统一搜索，同时过滤已有本地与云端真实歌单；
 Liked、Offline、My Top、Uploaded 快捷入口分别切换到现有 Library Songs 或 Stats 数据源，保留本地
-创建/排序/详情和云端打开/移除/改名/删除。当前播放缓存没有可枚举的真实歌曲集合，因此不伪造
-Android Cached 自动歌单。
+创建/排序/详情和云端打开/移除/改名/删除。本地歌单详情对照 `LocalPlaylistHeader` / `LocalPlaylistMenu`
+显示 SQLite 持久化的自定义封面，并通过 GPUI 原生单文件选择器选择、替换或移除；同一封面直接用于
+Library Overview/Playlists、Local Search 和 Home Speed Dial。未设置时直接按 Custom position 查询
+前四首带真实 thumbnail URL 的歌曲：一张整图显示，多张使用四格，完全无可用封面时才沿用主题占位；
+歌曲增删和 Custom 重排会同步详情及已固定歌单预览，不新增图片表、编辑器或平行缓存。详情另补齐整组 Play、Shuffle、Queue all、Download all，并按 Android 本地 Share 正文复制当前顺序的歌曲
+标题列表；详情内提供 Custom order、Date added、Title、Artist、Play time 和非 Custom 升降序，加入
+时间读取歌单关系，播放时长聚合完整本地历史，不改写 Custom position；Search 按大小写不敏感的歌曲
+标题或任一歌手实时过滤，显示结果数、无匹配和清除入口，点击结果仍按排序后完整歌单的对应索引建立
+播放队列，所有整组动作也共享该顺序。Custom、空 Search、非 Select 状态另提供 Move up/Move down，
+以真实 video ID 在单个 SQLite transaction 内交换相邻 position 并刷新详情。非空详情另有可发现的
+Select 模式，以真实 video ID 跨排序与
+搜索保持选择，支持逐行选择、全选及对子集 Play、Shuffle、Play next、Queue、Add to playlist、
+Download；Remove selected 在存储线程单事务删除并刷新详情及歌单计数。Guest 禁用播放与队列写入，批量下载
+复用现有持久队列和错误显示；任一歌单歌曲已有下载记录时另显示确认式 Remove downloads，活动任务
+先取消，其他状态复用现有缓存和 SQLite 删除路径。当前播放缓存没有可枚举的真实歌曲集合，因此不伪造 Android Cached
+自动歌单，也不增加全文索引或平行搜索后端。详情现另按当前排序后的完整集合生成 Android 对应四列
+CSV 或 EXTINF/watch URL M3U，通过锁定 GPUI 的三平台原生 Save 对话框写入用户选择路径；取消、成功
+和失败均回到当前详情状态，不修改 SQLite 或队列。
 
 Library Albums / Artists 现继续对照 Android 的来源切换：Albums 提供 Liked / Library /
 Uploaded，Artists 提供 Liked / Library。Liked 与订阅列表来自现有账号端点，Uploaded Albums
@@ -495,6 +591,48 @@ Channels 按真实 channel ID 去重并进入 Artist 详情；Downloaded 仅展�
 Album / Playlist 在线详情现补齐整组 Shuffle 与 Download all：Shuffle 使用完整真实歌曲集合
 建立随机队列并立即播放，Download all 逐曲进入既有持久下载队列及三路并发调度。Category
 详情有专辑目录时不再误报“无可播放曲目”，而是直接展示可打开的 Albums。
+Online Playlist 另对照 `YouTubePlaylistMenu.kt` 从 header 菜单的 `MUSIC_SHUFFLE` / `MIX` 项保留
+真实 watch-playlist endpoint：存在服务端 Shuffle 时优先请求其返回顺序，Radio 仅在真实端点存在时
+显示，两者成功后才替换并播放队列，加载与失败复用详情原位状态。响应缺少 Shuffle endpoint 时保留
+既有本地能力并明确标为 Shuffle loaded，不把部分已加载曲目冒充服务端完整随机。
+Album / Playlist header 中带真实 browse ID 的 Artist credit 现另形成可点击 Creator 行：Playlist
+作者和 Album 一个或多个 artists 均可进入现有 Artist 详情，详情内 Back 恢复已加载 collection；相同
+ID 去重，没有真实 ID 时只保留原 subtitle，不根据作者显示文本猜测频道身份。
+Album / Playlist 详情另补齐 Android Collection 菜单的整组 Play next / Queue all：若存在
+continuation，会先复用现有重复 token、无进展和最多 64 页保护补齐真实 collection，成功后才改变
+队列；Play next 保持整组顺序并紧接当前项，Queue all 在 Shuffle 关闭时原序追加，开启时参与未播放
+部分随机。空队列会直接建立并播放整组，加载与失败在详情可见，失败不会改变当前队列。
+同一完整 collection 路径现也服务 Play all、本地 Shuffle 与 Download all：长 Album/Playlist 会先
+补齐真实 continuation，再分别建立完整播放队列、随机完整歌曲或逐曲进入既有持久下载队列；任一补齐
+失败都原位显示且不改变当前队列或制造部分下载。Playlist 的真实服务端 Shuffle/Radio 继续走 endpoint
+队列，不被本地 completion 替代；Download all 不受 Listen Together Guest 播放控制限制。
+Collection 详情另对照 Android `YTItem.shareLink` / `YouTubePlaylistMenu` 增加 Copy link：Playlist
+使用真实 browse ID 并仅移除请求协议的 `VL` 前缀，Album 仅使用 browse 响应解析出的真实 playlist ID，
+统一写入现有 GPUI 系统剪贴板；Album 缺少真实 playlist ID 时不显示伪分享入口。
+Album/Playlist 现另提供 Add all to playlist：先沿用完整 browse continuation 补齐，再打开既有本地
+歌单 Picker 并显示待加入曲目数；目标选定后存储线程以单个 SQLite transaction 按 collection 原序
+写入，`INSERT OR IGNORE` 去重语义不变，任一错误整体回滚并走现有 Library error。单曲 Picker 复用
+同一批量路径，云端歌单的非幂等逐曲写入没有被扩成伪原子批量操作。
+
+Artist 在线详情现对照 `ArtistScreen.kt` 保留 browse 头部真实 `startRadioButton` 与 `playButton`
+播放端点，并显示 Radio / Shuffle。点击复用既有 InnerTube `next` 请求和队列歌曲解析，成功后才以
+服务端返回顺序替换队列并开始播放；缺少真实端点时不显示伪入口，加载与失败在当前 Artist 页面可见，
+Listen Together Guest 继续使用既有播放控制限制。
+Artist 的 Songs、Albums、Singles 等 shelf/carousel 另保留 Android `ArtistItemsScreen` 使用的真实
+`moreEndpoint`，在详情显示 View all 分区；点击发送原始 `browseId + params` 并复用现有 Browse
+歌曲/目录解析、continuation 与详情内 Back 栈，没有 endpoint 时不创建伪完整列表。
+Artist About 现另按 `ArtistScreen.kt` 从 immersive header 保留 subscriber count 与 monthly
+listener count 原始文本，与现有 description 一起显示；缺失字段不生成占位或推算数值。详情 Copy link
+按 `YouTubeArtistMenu.kt` / `ArtistItem.shareLink` 使用真实 browse ID 生成
+`music.youtube.com/channel/{id}` 并写入现有系统剪贴板。
+
+Podcast 在线详情现对照 `OnlinePodcastScreen.kt` 使用详情响应的真实 `channel_id` 显示
+View channel，点击复用现有 Artist/Channel browse 后端；没有真实 ID 时不显示入口。Browse 详情
+增加最小内存返回栈，Channel Back 会恢复已加载的 Podcast 与 episodes 而不重复请求，同一语义也
+修正既有 Related/Artist/Album 详情间跳转；最外层 Back 仍返回原 Home/Search/Library，栈不落库。
+Podcast 详情另提供 episode 搜索输入，按 Android 语义对已加载 Song 的标题和作者大小写不敏感
+过滤，显示匹配数/总数、清空和独立无匹配空态；点击结果以当前过滤集合及对应 index 建立真实队列。
+过滤不发请求，continuation 追加后会自动重新计算，逐集动作仍复用现有 Later/Queue/Download 链路。
 
 Online Search 现增加 Android `FILTER_VIDEO` 对应的 Videos 分类；点击后发送原始 InnerTube 参数，
 结果作为可播放视频歌曲进入既有分页、Play、Next、Queue、Download 与本地收藏链路。
