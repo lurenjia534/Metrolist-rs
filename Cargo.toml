@@ -56,6 +56,7 @@ serde_urlencoded = "=0.7.1"
 sha1 = "0.10.7"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+sys-locale = "0.3.2"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

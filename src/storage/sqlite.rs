@@ -16,11 +16,33 @@ use crate::config::{
 };
 #[cfg(test)]
 use crate::domain::ArtistCredit;
-use crate::domain::{BrowseItem, BrowseKind, LyricsDocument, LyricsLine, Song};
+use crate::domain::{AlbumCredit, BrowseItem, BrowseKind, LyricsDocument, LyricsLine, Song};
 use crate::services::{RecognitionResult, RepeatMode};
 use crate::{AppError, Result};
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 45;
+const LOCAL_PLAYLIST_PREVIEW_COLUMNS: &str = r#"
+    (SELECT s.thumbnail_url
+     FROM local_playlist_song preview
+     JOIN song s ON s.video_id = preview.video_id
+     WHERE preview.playlist_id = p.id AND NULLIF(trim(s.thumbnail_url), '') IS NOT NULL
+     ORDER BY preview.position ASC LIMIT 1 OFFSET 0) AS preview_thumbnail_url_1,
+    (SELECT s.thumbnail_url
+     FROM local_playlist_song preview
+     JOIN song s ON s.video_id = preview.video_id
+     WHERE preview.playlist_id = p.id AND NULLIF(trim(s.thumbnail_url), '') IS NOT NULL
+     ORDER BY preview.position ASC LIMIT 1 OFFSET 1) AS preview_thumbnail_url_2,
+    (SELECT s.thumbnail_url
+     FROM local_playlist_song preview
+     JOIN song s ON s.video_id = preview.video_id
+     WHERE preview.playlist_id = p.id AND NULLIF(trim(s.thumbnail_url), '') IS NOT NULL
+     ORDER BY preview.position ASC LIMIT 1 OFFSET 2) AS preview_thumbnail_url_3,
+    (SELECT s.thumbnail_url
+     FROM local_playlist_song preview
+     JOIN song s ON s.video_id = preview.video_id
+     WHERE preview.playlist_id = p.id AND NULLIF(trim(s.thumbnail_url), '') IS NOT NULL
+     ORDER BY preview.position ASC LIMIT 1 OFFSET 3) AS preview_thumbnail_url_4
+"#;
 const FORGOTTEN_FAVORITES_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const KEEP_LISTENING_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1_000;
 
@@ -198,9 +220,17 @@ impl AudioDownload {
 pub struct LocalPlaylist {
     pub id: i64,
     pub name: String,
+    pub thumbnail_url: Option<String>,
+    pub preview_thumbnail_urls: Vec<String>,
     pub song_count: usize,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalPlaylistSongMetadata {
+    pub added_at_ms: i64,
+    pub play_time_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -318,6 +348,30 @@ enum StoreCommand {
         limit: usize,
         reply: oneshot::Sender<Result<Vec<FavoriteEntry>>>,
     },
+    SetSpeedDialSong {
+        song: Song,
+        pinned: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SpeedDialSongs {
+        reply: oneshot::Sender<Result<Vec<Song>>>,
+    },
+    SetSpeedDialBrowseItem {
+        item: BrowseItem,
+        pinned: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SpeedDialBrowseItems {
+        reply: oneshot::Sender<Result<Vec<BrowseItem>>>,
+    },
+    SetSpeedDialLocalPlaylist {
+        playlist_id: i64,
+        pinned: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SpeedDialLocalPlaylists {
+        reply: oneshot::Sender<Result<Vec<LocalPlaylist>>>,
+    },
     SetPodcastSubscription {
         podcast: PodcastSubscription,
         subscribed: bool,
@@ -357,6 +411,11 @@ enum StoreCommand {
         name: String,
         reply: oneshot::Sender<Result<LocalPlaylist>>,
     },
+    SetPlaylistThumbnail {
+        playlist_id: i64,
+        thumbnail_url: Option<String>,
+        reply: oneshot::Sender<Result<LocalPlaylist>>,
+    },
     Playlists {
         sort: PlaylistSort,
         direction: SortDirection,
@@ -367,13 +426,33 @@ enum StoreCommand {
         song: Song,
         reply: oneshot::Sender<Result<()>>,
     },
+    AddManyToPlaylist {
+        playlist_id: i64,
+        songs: Vec<Song>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     PlaylistSongs {
         playlist_id: i64,
         reply: oneshot::Sender<Result<Vec<Song>>>,
     },
+    PlaylistSongMetadata {
+        playlist_id: i64,
+        reply: oneshot::Sender<Result<HashMap<String, LocalPlaylistSongMetadata>>>,
+    },
     RemoveFromPlaylist {
         playlist_id: i64,
         video_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    RemoveManyFromPlaylist {
+        playlist_id: i64,
+        video_ids: Vec<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    MovePlaylistSong {
+        playlist_id: i64,
+        video_id: String,
+        move_up: bool,
         reply: oneshot::Sender<Result<()>>,
     },
     DeletePlaylist {
@@ -806,6 +885,104 @@ impl DesktopStore {
         async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
     }
 
+    pub fn set_speed_dial_song(&self, song: Song, pinned: bool) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SetSpeedDialSong {
+                song,
+                pinned,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn speed_dial_songs(&self) -> BoxFuture<'static, Result<Vec<Song>>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SpeedDialSongs { reply })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn set_speed_dial_browse_item(
+        &self,
+        item: BrowseItem,
+        pinned: bool,
+    ) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SetSpeedDialBrowseItem {
+                item,
+                pinned,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn speed_dial_browse_items(&self) -> BoxFuture<'static, Result<Vec<BrowseItem>>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SpeedDialBrowseItems { reply })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn set_speed_dial_local_playlist(
+        &self,
+        playlist_id: i64,
+        pinned: bool,
+    ) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SetSpeedDialLocalPlaylist {
+                playlist_id,
+                pinned,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn speed_dial_local_playlists(&self) -> BoxFuture<'static, Result<Vec<LocalPlaylist>>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SpeedDialLocalPlaylists { reply })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
     pub fn set_podcast_subscription(
         &self,
         podcast: PodcastSubscription,
@@ -958,6 +1135,27 @@ impl DesktopStore {
         async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
     }
 
+    pub fn set_playlist_thumbnail(
+        &self,
+        playlist_id: i64,
+        thumbnail_url: Option<String>,
+    ) -> BoxFuture<'static, Result<LocalPlaylist>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::SetPlaylistThumbnail {
+                playlist_id,
+                thumbnail_url,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
     pub fn playlists(&self) -> BoxFuture<'static, Result<Vec<LocalPlaylist>>> {
         self.playlists_sorted(PlaylistSort::default(), SortDirection::default())
     }
@@ -1000,12 +1198,49 @@ impl DesktopStore {
         async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
     }
 
+    pub fn add_many_to_playlist(
+        &self,
+        playlist_id: i64,
+        songs: Vec<Song>,
+    ) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::AddManyToPlaylist {
+                playlist_id,
+                songs,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
     pub fn playlist_songs(&self, playlist_id: i64) -> BoxFuture<'static, Result<Vec<Song>>> {
         let (reply, receiver) = oneshot::channel();
         if self
             .inner
             .commands
             .send(StoreCommand::PlaylistSongs { playlist_id, reply })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn playlist_song_metadata(
+        &self,
+        playlist_id: i64,
+    ) -> BoxFuture<'static, Result<HashMap<String, LocalPlaylistSongMetadata>>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::PlaylistSongMetadata { playlist_id, reply })
             .is_err()
         {
             return futures::future::ready(Err(storage_stopped())).boxed();
@@ -1025,6 +1260,50 @@ impl DesktopStore {
             .send(StoreCommand::RemoveFromPlaylist {
                 playlist_id,
                 video_id,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn remove_many_from_playlist(
+        &self,
+        playlist_id: i64,
+        video_ids: Vec<String>,
+    ) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::RemoveManyFromPlaylist {
+                playlist_id,
+                video_ids,
+                reply,
+            })
+            .is_err()
+        {
+            return futures::future::ready(Err(storage_stopped())).boxed();
+        }
+        async move { receiver.await.map_err(|_| storage_stopped())? }.boxed()
+    }
+
+    pub fn move_playlist_song(
+        &self,
+        playlist_id: i64,
+        video_id: String,
+        move_up: bool,
+    ) -> BoxFuture<'static, Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .inner
+            .commands
+            .send(StoreCommand::MovePlaylistSong {
+                playlist_id,
+                video_id,
+                move_up,
                 reply,
             })
             .is_err()
@@ -1420,6 +1699,40 @@ fn run_store_worker(
             StoreCommand::Favorites { limit, reply } => {
                 let _ = reply.send(favorites(&connection, limit));
             }
+            StoreCommand::SetSpeedDialSong {
+                song,
+                pinned,
+                reply,
+            } => {
+                let _ = reply.send(set_speed_dial_song(&mut connection, &song, pinned));
+            }
+            StoreCommand::SpeedDialSongs { reply } => {
+                let _ = reply.send(speed_dial_songs(&connection));
+            }
+            StoreCommand::SetSpeedDialBrowseItem {
+                item,
+                pinned,
+                reply,
+            } => {
+                let _ = reply.send(set_speed_dial_browse_item(&mut connection, &item, pinned));
+            }
+            StoreCommand::SpeedDialBrowseItems { reply } => {
+                let _ = reply.send(speed_dial_browse_items(&connection));
+            }
+            StoreCommand::SetSpeedDialLocalPlaylist {
+                playlist_id,
+                pinned,
+                reply,
+            } => {
+                let _ = reply.send(set_speed_dial_local_playlist(
+                    &connection,
+                    playlist_id,
+                    pinned,
+                ));
+            }
+            StoreCommand::SpeedDialLocalPlaylists { reply } => {
+                let _ = reply.send(speed_dial_local_playlists(&connection));
+            }
             StoreCommand::SetPodcastSubscription {
                 podcast,
                 subscribed,
@@ -1475,6 +1788,17 @@ fn run_store_worker(
             } => {
                 let _ = reply.send(rename_playlist(&mut connection, playlist_id, &name));
             }
+            StoreCommand::SetPlaylistThumbnail {
+                playlist_id,
+                thumbnail_url,
+                reply,
+            } => {
+                let _ = reply.send(set_playlist_thumbnail(
+                    &mut connection,
+                    playlist_id,
+                    thumbnail_url.as_deref(),
+                ));
+            }
             StoreCommand::Playlists {
                 sort,
                 direction,
@@ -1489,8 +1813,18 @@ fn run_store_worker(
             } => {
                 let _ = reply.send(add_to_playlist(&mut connection, playlist_id, &song));
             }
+            StoreCommand::AddManyToPlaylist {
+                playlist_id,
+                songs,
+                reply,
+            } => {
+                let _ = reply.send(add_many_to_playlist(&mut connection, playlist_id, &songs));
+            }
             StoreCommand::PlaylistSongs { playlist_id, reply } => {
                 let _ = reply.send(playlist_songs(&connection, playlist_id));
+            }
+            StoreCommand::PlaylistSongMetadata { playlist_id, reply } => {
+                let _ = reply.send(playlist_song_metadata(&connection, playlist_id));
             }
             StoreCommand::RemoveFromPlaylist {
                 playlist_id,
@@ -1501,6 +1835,30 @@ fn run_store_worker(
                     &mut connection,
                     playlist_id,
                     &video_id,
+                ));
+            }
+            StoreCommand::RemoveManyFromPlaylist {
+                playlist_id,
+                video_ids,
+                reply,
+            } => {
+                let _ = reply.send(remove_many_from_playlist(
+                    &mut connection,
+                    playlist_id,
+                    &video_ids,
+                ));
+            }
+            StoreCommand::MovePlaylistSong {
+                playlist_id,
+                video_id,
+                move_up,
+                reply,
+            } => {
+                let _ = reply.send(move_playlist_song(
+                    &mut connection,
+                    playlist_id,
+                    &video_id,
+                    move_up,
                 ));
             }
             StoreCommand::DeletePlaylist { playlist_id, reply } => {
@@ -1702,6 +2060,72 @@ fn open_and_migrate(path: &Path) -> Result<Connection> {
     }
     if current_version < 23 {
         migrate_to_v23(&mut connection)?;
+    }
+    if current_version < 24 {
+        migrate_to_v24(&mut connection)?;
+    }
+    if current_version < 25 {
+        migrate_to_v25(&mut connection)?;
+    }
+    if current_version < 26 {
+        migrate_to_v26(&mut connection)?;
+    }
+    if current_version < 27 {
+        migrate_to_v27(&mut connection)?;
+    }
+    if current_version < 28 {
+        migrate_to_v28(&mut connection)?;
+    }
+    if current_version < 29 {
+        migrate_to_v29(&mut connection)?;
+    }
+    if current_version < 30 {
+        migrate_to_v30(&mut connection)?;
+    }
+    if current_version < 31 {
+        migrate_to_v31(&mut connection)?;
+    }
+    if current_version < 32 {
+        migrate_to_v32(&mut connection)?;
+    }
+    if current_version < 33 {
+        migrate_to_v33(&mut connection)?;
+    }
+    if current_version < 34 {
+        migrate_to_v34(&mut connection)?;
+    }
+    if current_version < 35 {
+        migrate_to_v35(&mut connection)?;
+    }
+    if current_version < 36 {
+        migrate_to_v36(&mut connection)?;
+    }
+    if current_version < 37 {
+        migrate_to_v37(&mut connection)?;
+    }
+    if current_version < 38 {
+        migrate_to_v38(&mut connection)?;
+    }
+    if current_version < 39 {
+        migrate_to_v39(&mut connection)?;
+    }
+    if current_version < 40 {
+        migrate_to_v40(&mut connection)?;
+    }
+    if current_version < 41 {
+        migrate_to_v41(&mut connection)?;
+    }
+    if current_version < 42 {
+        migrate_to_v42(&mut connection)?;
+    }
+    if current_version < 43 {
+        migrate_to_v43(&mut connection)?;
+    }
+    if current_version < 44 {
+        migrate_to_v44(&mut connection)?;
+    }
+    if current_version < 45 {
+        migrate_to_v45(&mut connection)?;
     }
     Ok(connection)
 }
@@ -2326,6 +2750,433 @@ fn migrate_to_v23(connection: &mut Connection) -> Result<()> {
     transaction.commit().map_err(storage_error)
 }
 
+fn migrate_to_v24(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE speed_dial_song (
+                 video_id TEXT PRIMARY KEY REFERENCES song(video_id) ON DELETE CASCADE,
+                 pinned_at_ms INTEGER NOT NULL CHECK(pinned_at_ms >= 0)
+             );
+             CREATE INDEX speed_dial_song_pinned_at
+                 ON speed_dial_song(pinned_at_ms ASC, video_id ASC);",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (24, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v25(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE speed_dial_browse (
+                 browse_id TEXT NOT NULL CHECK(length(trim(browse_id)) > 0),
+                 kind TEXT NOT NULL CHECK(kind IN ('album', 'artist', 'playlist', 'podcast')),
+                 title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                 subtitle TEXT NOT NULL,
+                 thumbnail_url TEXT,
+                 params TEXT,
+                 pinned_at_ms INTEGER NOT NULL CHECK(pinned_at_ms >= 0),
+                 PRIMARY KEY(browse_id, kind)
+             );
+             CREATE INDEX speed_dial_browse_pinned_at
+                 ON speed_dial_browse(pinned_at_ms ASC, kind ASC, browse_id ASC);",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (25, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v26(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE speed_dial_local_playlist (
+                 playlist_id INTEGER PRIMARY KEY
+                     REFERENCES local_playlist(id) ON DELETE CASCADE,
+                 pinned_at_ms INTEGER NOT NULL CHECK(pinned_at_ms >= 0)
+             );
+             CREATE INDEX speed_dial_local_playlist_pinned_at
+                 ON speed_dial_local_playlist(pinned_at_ms ASC, playlist_id ASC);",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (26, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v27(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch("ALTER TABLE local_playlist ADD COLUMN thumbnail_url TEXT;")
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (27, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v28(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN pause_listening_history INTEGER NOT NULL DEFAULT 0
+                 CHECK(pause_listening_history IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN pause_search_history INTEGER NOT NULL DEFAULT 0
+                 CHECK(pause_search_history IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (28, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v29(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN history_duration_seconds INTEGER NOT NULL DEFAULT 30
+                 CHECK(history_duration_seconds BETWEEN 1 AND 100);",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (29, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v30(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN persistent_queue INTEGER NOT NULL DEFAULT 1
+                 CHECK(persistent_queue IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (30, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v31(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN autoplay INTEGER NOT NULL DEFAULT 1
+                 CHECK(autoplay IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (31, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v32(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN persistent_shuffle_across_queues INTEGER NOT NULL DEFAULT 0
+                 CHECK(persistent_shuffle_across_queues IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN remember_shuffle_and_repeat INTEGER NOT NULL DEFAULT 1
+                 CHECK(remember_shuffle_and_repeat IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (32, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v33(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN disable_load_more_when_repeat_all INTEGER NOT NULL DEFAULT 0
+                 CHECK(disable_load_more_when_repeat_all IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (33, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v34(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN prevent_duplicate_tracks_in_queue INTEGER NOT NULL DEFAULT 0
+                 CHECK(prevent_duplicate_tracks_in_queue IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (34, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v35(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN auto_skip_next_on_error INTEGER NOT NULL DEFAULT 0
+                 CHECK(auto_skip_next_on_error IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (35, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v36(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN shuffle_playlist_first INTEGER NOT NULL DEFAULT 0
+                 CHECK(shuffle_playlist_first IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (36, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v37(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN pause_on_mute INTEGER NOT NULL DEFAULT 0
+                 CHECK(pause_on_mute IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (37, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v38(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN progressive_seek INTEGER NOT NULL DEFAULT 0
+                 CHECK(progressive_seek IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (38, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v39(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN auto_download_on_like INTEGER NOT NULL DEFAULT 0
+                 CHECK(auto_download_on_like IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (39, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v40(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN auto_radio_queue INTEGER NOT NULL DEFAULT 1
+                 CHECK(auto_radio_queue IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (40, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v41(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN auto_load_more INTEGER NOT NULL DEFAULT 1
+                 CHECK(auto_load_more IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (41, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v42(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN sleep_timer_stop_after_current_song INTEGER NOT NULL DEFAULT 0
+                 CHECK(sleep_timer_stop_after_current_song IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN sleep_timer_fade_out INTEGER NOT NULL DEFAULT 0
+                 CHECK(sleep_timer_fade_out IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (42, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v43(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN skip_silence INTEGER NOT NULL DEFAULT 0
+                 CHECK(skip_silence IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN skip_silence_instant INTEGER NOT NULL DEFAULT 0
+                 CHECK(skip_silence_instant IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (43, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v44(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN crossfade INTEGER NOT NULL DEFAULT 0
+                 CHECK(crossfade IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN crossfade_seconds INTEGER NOT NULL DEFAULT 5
+                 CHECK(crossfade_seconds BETWEEN 1 AND 15);
+             ALTER TABLE app_settings
+                 ADD COLUMN crossfade_gapless_albums INTEGER NOT NULL DEFAULT 1
+                 CHECK(crossfade_gapless_albums IN (0, 1));",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (44, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_to_v45(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN content_language TEXT NOT NULL DEFAULT 'system';
+             ALTER TABLE app_settings
+                 ADD COLUMN content_country TEXT NOT NULL DEFAULT 'system';",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (45, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
 fn record_history(connection: &mut Connection, song: &Song, play_time: Duration) -> Result<()> {
     let transaction = connection.transaction().map_err(storage_error)?;
     upsert_song(&transaction, song)?;
@@ -2345,7 +3196,10 @@ fn recent_history(connection: &Connection, limit: usize) -> Result<Vec<HistoryEn
         .prepare(
             "SELECT h.id, h.played_at_ms, h.play_time_ms,
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM play_history h
              JOIN song s ON s.video_id = h.video_id
              ORDER BY h.played_at_ms DESC, h.id DESC
@@ -2385,7 +3239,10 @@ fn forgotten_favorites(connection: &Connection, limit: usize) -> Result<Vec<Song
                  GROUP BY video_id
              )
              SELECT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM play_totals totals
              JOIN song s ON s.video_id = totals.video_id
              WHERE totals.recent_play_time > 0
@@ -2417,7 +3274,10 @@ fn keep_listening(connection: &Connection, limit: usize, offset: usize) -> Resul
                  LIMIT ?3 OFFSET ?4
              )
              SELECT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM top_songs
              JOIN song s ON s.video_id = top_songs.video_id
              ORDER BY top_songs.time_listened DESC, s.video_id ASC",
@@ -2451,7 +3311,10 @@ fn listening_stats(connection: &Connection, start_ms: i64, limit: usize) -> Resu
         .prepare(
             "SELECT COUNT(h.id), SUM(h.play_time_ms),
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM play_history h
              JOIN song s ON s.video_id = h.video_id
              WHERE h.played_at_ms >= ?1
@@ -2810,7 +3673,10 @@ fn favorites(connection: &Connection, limit: usize) -> Result<Vec<FavoriteEntry>
         .prepare(
             "SELECT f.liked_at_ms,
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM favorite_song f
              JOIN song s ON s.video_id = f.video_id
              ORDER BY f.liked_at_ms DESC, f.video_id ASC
@@ -2824,6 +3690,183 @@ fn favorites(connection: &Connection, limit: usize) -> Result<Vec<FavoriteEntry>
                 song: song_from_row(row, 1)?,
             })
         })
+        .map_err(storage_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
+fn set_speed_dial_song(connection: &mut Connection, song: &Song, pinned: bool) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    if pinned {
+        upsert_song(&transaction, song)?;
+        transaction
+            .execute(
+                "INSERT INTO speed_dial_song(video_id, pinned_at_ms) VALUES (?1, ?2)
+                 ON CONFLICT(video_id) DO NOTHING",
+                params![song.video_id, now_ms()],
+            )
+            .map_err(storage_error)?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM speed_dial_song WHERE video_id = ?1",
+                [&song.video_id],
+            )
+            .map_err(storage_error)?;
+    }
+    transaction.commit().map_err(storage_error)
+}
+
+fn speed_dial_songs(connection: &Connection) -> Result<Vec<Song>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+             FROM speed_dial_song d
+             JOIN song s ON s.video_id = d.video_id
+             ORDER BY d.pinned_at_ms ASC, d.video_id ASC",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map([], |row| song_from_row(row, 0))
+        .map_err(storage_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
+fn speed_dial_browse_kind(kind: BrowseKind) -> Result<&'static str> {
+    match kind {
+        BrowseKind::Album => Ok("album"),
+        BrowseKind::Artist => Ok("artist"),
+        BrowseKind::Playlist => Ok("playlist"),
+        BrowseKind::Podcast => Ok("podcast"),
+        BrowseKind::Category => Err(AppError::Storage(
+            "collections cannot be pinned to Speed Dial".into(),
+        )),
+    }
+}
+
+fn set_speed_dial_browse_item(
+    connection: &mut Connection,
+    item: &BrowseItem,
+    pinned: bool,
+) -> Result<()> {
+    let kind = speed_dial_browse_kind(item.kind)?;
+    let transaction = connection.transaction().map_err(storage_error)?;
+    if pinned {
+        transaction
+            .execute(
+                "INSERT INTO speed_dial_browse(
+                     browse_id, kind, title, subtitle, thumbnail_url, params, pinned_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(browse_id, kind) DO NOTHING",
+                params![
+                    item.browse_id,
+                    kind,
+                    item.title,
+                    item.subtitle,
+                    item.thumbnail_url,
+                    item.params,
+                    now_ms(),
+                ],
+            )
+            .map_err(storage_error)?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM speed_dial_browse WHERE browse_id = ?1 AND kind = ?2",
+                params![item.browse_id, kind],
+            )
+            .map_err(storage_error)?;
+    }
+    transaction.commit().map_err(storage_error)
+}
+
+fn speed_dial_browse_items(connection: &Connection) -> Result<Vec<BrowseItem>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT browse_id, kind, title, subtitle, thumbnail_url, params
+             FROM speed_dial_browse
+             ORDER BY pinned_at_ms ASC, kind ASC, browse_id ASC",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            let kind: String = row.get(1)?;
+            let kind = match kind.as_str() {
+                "album" => BrowseKind::Album,
+                "artist" => BrowseKind::Artist,
+                "playlist" => BrowseKind::Playlist,
+                "podcast" => BrowseKind::Podcast,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(BrowseItem {
+                browse_id: row.get(0)?,
+                kind,
+                title: row.get(2)?,
+                subtitle: row.get(3)?,
+                thumbnail_url: row.get(4)?,
+                params: row.get(5)?,
+                editable: false,
+            })
+        })
+        .map_err(storage_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
+fn set_speed_dial_local_playlist(
+    connection: &Connection,
+    playlist_id: i64,
+    pinned: bool,
+) -> Result<()> {
+    if pinned {
+        let inserted = connection
+            .execute(
+                "INSERT INTO speed_dial_local_playlist(playlist_id, pinned_at_ms)
+                 SELECT id, ?2 FROM local_playlist WHERE id = ?1
+                 ON CONFLICT(playlist_id) DO NOTHING",
+                params![playlist_id, now_ms()],
+            )
+            .map_err(storage_error)?;
+        if inserted == 0
+            && !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_playlist WHERE id = ?1)",
+                    [playlist_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage_error)?
+        {
+            return Err(AppError::Storage("playlist no longer exists".into()));
+        }
+    } else {
+        connection
+            .execute(
+                "DELETE FROM speed_dial_local_playlist WHERE playlist_id = ?1",
+                [playlist_id],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn speed_dial_local_playlists(connection: &Connection) -> Result<Vec<LocalPlaylist>> {
+    let query = format!(
+        "SELECT p.id, p.name, COUNT(ps.video_id), p.created_at_ms, p.updated_at_ms,
+                p.thumbnail_url, {LOCAL_PLAYLIST_PREVIEW_COLUMNS}
+         FROM speed_dial_local_playlist d
+         JOIN local_playlist p ON p.id = d.playlist_id
+         LEFT JOIN local_playlist_song ps ON ps.playlist_id = p.id
+         GROUP BY p.id, d.pinned_at_ms
+         ORDER BY d.pinned_at_ms ASC, p.id ASC"
+    );
+    let mut statement = connection.prepare(&query).map_err(storage_error)?;
+    let rows = statement
+        .query_map([], local_playlist_from_row)
         .map_err(storage_error)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(storage_error)
@@ -2994,7 +4037,10 @@ fn episodes_for_later(connection: &Connection) -> Result<Vec<SavedEpisode>> {
         .prepare(
             "SELECT e.saved_at_ms, p.position_ms,
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM episode_for_later e
              JOIN song s ON s.video_id = e.video_id
              LEFT JOIN episode_playback_position p ON p.video_id = e.video_id
@@ -3233,6 +4279,8 @@ fn create_playlist(connection: &mut Connection, name: &str) -> Result<LocalPlayl
     Ok(LocalPlaylist {
         id: connection.last_insert_rowid(),
         name: name.into(),
+        thumbnail_url: None,
+        preview_thumbnail_urls: Vec::new(),
         song_count: 0,
         created_at_ms: timestamp,
         updated_at_ms: timestamp,
@@ -3262,17 +4310,38 @@ fn rename_playlist(
         .ok_or_else(|| AppError::Storage("playlist disappeared after it was renamed".into()))
 }
 
-fn playlist(connection: &Connection, playlist_id: i64) -> Result<Option<LocalPlaylist>> {
-    connection
-        .query_row(
-            "SELECT p.id, p.name, COUNT(ps.video_id), p.created_at_ms, p.updated_at_ms
-             FROM local_playlist p
-             LEFT JOIN local_playlist_song ps ON ps.playlist_id = p.id
-             WHERE p.id = ?1
-             GROUP BY p.id",
-            [playlist_id],
-            local_playlist_from_row,
+fn set_playlist_thumbnail(
+    connection: &mut Connection,
+    playlist_id: i64,
+    thumbnail_url: Option<&str>,
+) -> Result<LocalPlaylist> {
+    let thumbnail_url = normalized_optional_metadata(thumbnail_url, 16_384, "playlist thumbnail")?;
+    let updated = connection
+        .execute(
+            "UPDATE local_playlist
+             SET thumbnail_url = ?2, updated_at_ms = ?3
+             WHERE id = ?1",
+            params![playlist_id, thumbnail_url, now_ms()],
         )
+        .map_err(storage_error)?;
+    if updated == 0 {
+        return Err(AppError::Storage("playlist no longer exists".into()));
+    }
+    playlist(connection, playlist_id)?
+        .ok_or_else(|| AppError::Storage("playlist disappeared after its cover changed".into()))
+}
+
+fn playlist(connection: &Connection, playlist_id: i64) -> Result<Option<LocalPlaylist>> {
+    let query = format!(
+        "SELECT p.id, p.name, COUNT(ps.video_id), p.created_at_ms, p.updated_at_ms,
+                p.thumbnail_url, {LOCAL_PLAYLIST_PREVIEW_COLUMNS}
+         FROM local_playlist p
+         LEFT JOIN local_playlist_song ps ON ps.playlist_id = p.id
+         WHERE p.id = ?1
+         GROUP BY p.id"
+    );
+    connection
+        .query_row(&query, [playlist_id], local_playlist_from_row)
         .optional()
         .map_err(storage_error)
 }
@@ -3293,7 +4362,8 @@ fn playlists(
         SortDirection::Descending => "DESC",
     };
     let query = format!(
-        "SELECT p.id, p.name, COUNT(ps.video_id), p.created_at_ms, p.updated_at_ms
+        "SELECT p.id, p.name, COUNT(ps.video_id), p.created_at_ms, p.updated_at_ms,
+                p.thumbnail_url, {LOCAL_PLAYLIST_PREVIEW_COLUMNS}
          FROM local_playlist p
          LEFT JOIN local_playlist_song ps ON ps.playlist_id = p.id
          GROUP BY p.id
@@ -3309,6 +4379,9 @@ fn playlists(
 
 fn local_playlist_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalPlaylist> {
     let song_count: i64 = row.get(2)?;
+    let preview_thumbnail_urls = (6..10)
+        .filter_map(|index| row.get::<_, Option<String>>(index).transpose())
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(LocalPlaylist {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -3316,25 +4389,48 @@ fn local_playlist_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalPla
             .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, song_count))?,
         created_at_ms: row.get(3)?,
         updated_at_ms: row.get(4)?,
+        thumbnail_url: row.get(5)?,
+        preview_thumbnail_urls,
     })
 }
 
 fn add_to_playlist(connection: &mut Connection, playlist_id: i64, song: &Song) -> Result<()> {
+    add_many_to_playlist(connection, playlist_id, std::slice::from_ref(song))
+}
+
+fn add_many_to_playlist(
+    connection: &mut Connection,
+    playlist_id: i64,
+    songs: &[Song],
+) -> Result<()> {
     let transaction = connection.transaction().map_err(storage_error)?;
-    upsert_song(&transaction, song)?;
     let timestamp = now_ms();
-    let inserted = transaction
-        .execute(
-            "INSERT OR IGNORE INTO local_playlist_song(
-                 playlist_id, video_id, position, added_at_ms
-             )
-             SELECT ?1, ?2, COALESCE(MAX(position) + 1, 0), ?3
+    let mut next_position: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0)
              FROM local_playlist_song
              WHERE playlist_id = ?1",
-            params![playlist_id, song.video_id, timestamp],
+            [playlist_id],
+            |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if inserted > 0 {
+    let mut inserted_any = false;
+    for song in songs {
+        upsert_song(&transaction, song)?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO local_playlist_song(
+                     playlist_id, video_id, position, added_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![playlist_id, song.video_id, next_position, timestamp],
+            )
+            .map_err(storage_error)?;
+        if inserted > 0 {
+            next_position += 1;
+            inserted_any = true;
+        }
+    }
+    if inserted_any {
         transaction
             .execute(
                 "UPDATE local_playlist SET updated_at_ms = ?2 WHERE id = ?1",
@@ -3349,7 +4445,10 @@ fn playlist_songs(connection: &Connection, playlist_id: i64) -> Result<Vec<Song>
     let mut statement = connection
         .prepare(
             "SELECT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM local_playlist_song ps
              JOIN song s ON s.video_id = ps.video_id
              WHERE ps.playlist_id = ?1
@@ -3360,6 +4459,35 @@ fn playlist_songs(connection: &Connection, playlist_id: i64) -> Result<Vec<Song>
         .query_map([playlist_id], |row| song_from_row(row, 0))
         .map_err(storage_error)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
+fn playlist_song_metadata(
+    connection: &Connection,
+    playlist_id: i64,
+) -> Result<HashMap<String, LocalPlaylistSongMetadata>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT ps.video_id, ps.added_at_ms, COALESCE(SUM(h.play_time_ms), 0)
+             FROM local_playlist_song ps
+             LEFT JOIN play_history h ON h.video_id = ps.video_id
+             WHERE ps.playlist_id = ?1
+             GROUP BY ps.video_id, ps.added_at_ms",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map([playlist_id], |row| {
+            let play_time_ms: i64 = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                LocalPlaylistSongMetadata {
+                    added_at_ms: row.get(1)?,
+                    play_time_ms: u64::try_from(play_time_ms).unwrap_or_default(),
+                },
+            ))
+        })
+        .map_err(storage_error)?;
+    rows.collect::<std::result::Result<HashMap<_, _>, _>>()
         .map_err(storage_error)
 }
 
@@ -3383,6 +4511,114 @@ fn remove_from_playlist(
             )
             .map_err(storage_error)?;
     }
+    transaction.commit().map_err(storage_error)
+}
+
+fn remove_many_from_playlist(
+    connection: &mut Connection,
+    playlist_id: i64,
+    video_ids: &[String],
+) -> Result<()> {
+    if video_ids.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection.transaction().map_err(storage_error)?;
+    let mut removed = 0;
+    for video_id in video_ids {
+        removed += transaction
+            .execute(
+                "DELETE FROM local_playlist_song WHERE playlist_id = ?1 AND video_id = ?2",
+                params![playlist_id, video_id],
+            )
+            .map_err(storage_error)?;
+    }
+    if removed > 0 {
+        transaction
+            .execute(
+                "UPDATE local_playlist SET updated_at_ms = ?2 WHERE id = ?1",
+                params![playlist_id, now_ms()],
+            )
+            .map_err(storage_error)?;
+    }
+    transaction.commit().map_err(storage_error)
+}
+
+fn move_playlist_song(
+    connection: &mut Connection,
+    playlist_id: i64,
+    video_id: &str,
+    move_up: bool,
+) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    let current_position = transaction
+        .query_row(
+            "SELECT position
+             FROM local_playlist_song
+             WHERE playlist_id = ?1 AND video_id = ?2",
+            params![playlist_id, video_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(storage_error)?
+        .ok_or_else(|| AppError::Storage("playlist song no longer exists".into()))?;
+    let (comparison, order) = if move_up { ("<", "DESC") } else { (">", "ASC") };
+    let neighbor_query = format!(
+        "SELECT position
+         FROM local_playlist_song
+         WHERE playlist_id = ?1 AND position {comparison} ?2
+         ORDER BY position {order}
+         LIMIT 1"
+    );
+    let Some(neighbor_position) = transaction
+        .query_row(
+            &neighbor_query,
+            params![playlist_id, current_position],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(storage_error)?
+    else {
+        return Ok(());
+    };
+    let temporary_position = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0)
+             FROM local_playlist_song
+             WHERE playlist_id = ?1",
+            [playlist_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE local_playlist_song
+             SET position = ?3
+             WHERE playlist_id = ?1 AND video_id = ?2",
+            params![playlist_id, video_id, temporary_position],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE local_playlist_song
+             SET position = ?3
+             WHERE playlist_id = ?1 AND position = ?2",
+            params![playlist_id, neighbor_position, current_position],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE local_playlist_song
+             SET position = ?3
+             WHERE playlist_id = ?1 AND video_id = ?2",
+            params![playlist_id, video_id, neighbor_position],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE local_playlist SET updated_at_ms = ?2 WHERE id = ?1",
+            params![playlist_id, now_ms()],
+        )
+        .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
 }
 
@@ -3541,7 +4777,10 @@ fn load_session(connection: &Connection) -> Result<Option<PersistedSession>> {
     let mut statement = connection
         .prepare(
             "SELECT s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM queue_item q
              JOIN song s ON s.video_id = q.video_id
              ORDER BY q.position ASC",
@@ -3756,8 +4995,18 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  listen_together_auto_approve_joins,
                  listen_together_auto_approve_suggestions,
                  listen_together_sync_host_volume,
-                 equalizer_active_profile_json
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
+                 equalizer_active_profile_json,
+                 pause_listening_history, pause_search_history,
+                 history_duration_seconds, persistent_queue, autoplay,
+                 persistent_shuffle_across_queues, remember_shuffle_and_repeat,
+                 disable_load_more_when_repeat_all, prevent_duplicate_tracks_in_queue,
+                 auto_skip_next_on_error, shuffle_playlist_first, pause_on_mute,
+                 progressive_seek, auto_download_on_like, auto_radio_queue,
+                 auto_load_more, sleep_timer_stop_after_current_song,
+                 sleep_timer_fade_out, skip_silence, skip_silence_instant,
+                 crossfade, crossfade_seconds, crossfade_gapless_albums,
+                 content_language, content_country
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57)
              ON CONFLICT(singleton) DO UPDATE SET
                  proxy_enabled = excluded.proxy_enabled,
                  proxy_kind = excluded.proxy_kind,
@@ -3790,7 +5039,32 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  listen_together_auto_approve_joins = excluded.listen_together_auto_approve_joins,
                  listen_together_auto_approve_suggestions = excluded.listen_together_auto_approve_suggestions,
                  listen_together_sync_host_volume = excluded.listen_together_sync_host_volume,
-                 equalizer_active_profile_json = excluded.equalizer_active_profile_json",
+                 equalizer_active_profile_json = excluded.equalizer_active_profile_json,
+                 pause_listening_history = excluded.pause_listening_history,
+                 pause_search_history = excluded.pause_search_history,
+                 history_duration_seconds = excluded.history_duration_seconds,
+                 persistent_queue = excluded.persistent_queue,
+                 autoplay = excluded.autoplay,
+                 persistent_shuffle_across_queues = excluded.persistent_shuffle_across_queues,
+                 remember_shuffle_and_repeat = excluded.remember_shuffle_and_repeat,
+                 disable_load_more_when_repeat_all = excluded.disable_load_more_when_repeat_all,
+                 prevent_duplicate_tracks_in_queue = excluded.prevent_duplicate_tracks_in_queue,
+                 auto_skip_next_on_error = excluded.auto_skip_next_on_error,
+                 shuffle_playlist_first = excluded.shuffle_playlist_first,
+                 pause_on_mute = excluded.pause_on_mute,
+                 progressive_seek = excluded.progressive_seek,
+                 auto_download_on_like = excluded.auto_download_on_like,
+                 auto_radio_queue = excluded.auto_radio_queue,
+                 auto_load_more = excluded.auto_load_more,
+                 sleep_timer_stop_after_current_song = excluded.sleep_timer_stop_after_current_song,
+                 sleep_timer_fade_out = excluded.sleep_timer_fade_out,
+                 skip_silence = excluded.skip_silence,
+                 skip_silence_instant = excluded.skip_silence_instant,
+                 crossfade = excluded.crossfade,
+                 crossfade_seconds = excluded.crossfade_seconds,
+                 crossfade_gapless_albums = excluded.crossfade_gapless_albums,
+                 content_language = excluded.content_language,
+                 content_country = excluded.content_country",
             params![
                 settings.proxy.enabled,
                 settings.proxy.kind.storage_value(),
@@ -3824,6 +5098,31 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                 settings.listen_together.auto_approve_suggestions,
                 settings.listen_together.sync_host_volume,
                 equalizer_active_profile_json,
+                settings.pause_listening_history,
+                settings.pause_search_history,
+                settings.history_duration_seconds,
+                settings.persistent_queue,
+                settings.autoplay,
+                settings.persistent_shuffle_across_queues,
+                settings.remember_shuffle_and_repeat,
+                settings.disable_load_more_when_repeat_all,
+                settings.prevent_duplicate_tracks_in_queue,
+                settings.auto_skip_next_on_error,
+                settings.shuffle_playlist_first,
+                settings.pause_on_mute,
+                settings.progressive_seek,
+                settings.auto_download_on_like,
+                settings.auto_radio_queue,
+                settings.auto_load_more,
+                settings.sleep_timer_stop_after_current_song,
+                settings.sleep_timer_fade_out,
+                settings.skip_silence,
+                settings.skip_silence_instant,
+                settings.crossfade,
+                settings.crossfade_seconds,
+                settings.crossfade_gapless_albums,
+                settings.content_language,
+                settings.content_country,
             ],
         )
         .map_err(storage_error)?;
@@ -3846,7 +5145,17 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     listen_together_auto_approve_joins,
                     listen_together_auto_approve_suggestions,
                     listen_together_sync_host_volume,
-                    equalizer_active_profile_json
+                    equalizer_active_profile_json,
+                    pause_listening_history, pause_search_history,
+                    history_duration_seconds, persistent_queue, autoplay,
+                    persistent_shuffle_across_queues, remember_shuffle_and_repeat,
+                    disable_load_more_when_repeat_all, prevent_duplicate_tracks_in_queue,
+                    auto_skip_next_on_error, shuffle_playlist_first, pause_on_mute,
+                    progressive_seek, auto_download_on_like, auto_radio_queue,
+                    auto_load_more, sleep_timer_stop_after_current_song,
+                    sleep_timer_fade_out, skip_silence, skip_silence_instant,
+                    crossfade, crossfade_seconds, crossfade_gapless_albums,
+                    content_language, content_country
              FROM app_settings WHERE singleton = 1",
             [],
             |row| {
@@ -3882,6 +5191,31 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     row.get::<_, bool>(28)?,
                     row.get::<_, bool>(29)?,
                     row.get::<_, Option<String>>(30)?,
+                    row.get::<_, bool>(31)?,
+                    row.get::<_, bool>(32)?,
+                    row.get::<_, u16>(33)?,
+                    row.get::<_, bool>(34)?,
+                    row.get::<_, bool>(35)?,
+                    row.get::<_, bool>(36)?,
+                    row.get::<_, bool>(37)?,
+                    row.get::<_, bool>(38)?,
+                    row.get::<_, bool>(39)?,
+                    row.get::<_, bool>(40)?,
+                    row.get::<_, bool>(41)?,
+                    row.get::<_, bool>(42)?,
+                    row.get::<_, bool>(43)?,
+                    row.get::<_, bool>(44)?,
+                    row.get::<_, bool>(45)?,
+                    row.get::<_, bool>(46)?,
+                    row.get::<_, bool>(47)?,
+                    row.get::<_, bool>(48)?,
+                    row.get::<_, bool>(49)?,
+                    row.get::<_, bool>(50)?,
+                    row.get::<_, bool>(51)?,
+                    row.get::<_, u8>(52)?,
+                    row.get::<_, bool>(53)?,
+                    row.get::<_, String>(54)?,
+                    row.get::<_, String>(55)?,
                 ))
             },
         )
@@ -3919,6 +5253,31 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         listen_together_auto_approve_suggestions,
         listen_together_sync_host_volume,
         equalizer_active_profile_json,
+        pause_listening_history,
+        pause_search_history,
+        history_duration_seconds,
+        persistent_queue,
+        autoplay,
+        persistent_shuffle_across_queues,
+        remember_shuffle_and_repeat,
+        disable_load_more_when_repeat_all,
+        prevent_duplicate_tracks_in_queue,
+        auto_skip_next_on_error,
+        shuffle_playlist_first,
+        pause_on_mute,
+        progressive_seek,
+        auto_download_on_like,
+        auto_radio_queue,
+        auto_load_more,
+        sleep_timer_stop_after_current_song,
+        sleep_timer_fade_out,
+        skip_silence,
+        skip_silence_instant,
+        crossfade,
+        crossfade_seconds,
+        crossfade_gapless_albums,
+        content_language,
+        content_country,
     )) = stored
     else {
         return Ok(None);
@@ -3944,6 +5303,8 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
             username: proxy_username,
             password: proxy_password,
         },
+        content_language,
+        content_country,
         audio_quality: AudioQuality::from_storage(&audio_quality)?,
         audio_normalization,
         loudness_level: LoudnessLevel::from_storage(&loudness_level)?,
@@ -3960,7 +5321,30 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         cache_root: PathBuf::from(cache_root),
         audio_cache_bytes,
         auto_radio,
+        auto_radio_queue,
+        auto_load_more,
+        sleep_timer_stop_after_current_song,
+        sleep_timer_fade_out,
+        skip_silence,
+        skip_silence_instant,
+        crossfade,
+        crossfade_seconds,
+        crossfade_gapless_albums,
+        persistent_queue,
+        autoplay,
+        auto_skip_next_on_error,
+        auto_download_on_like,
+        pause_on_mute,
+        progressive_seek,
+        persistent_shuffle_across_queues,
+        shuffle_playlist_first,
+        remember_shuffle_and_repeat,
+        disable_load_more_when_repeat_all,
+        prevent_duplicate_tracks_in_queue,
         youtube_history_sync,
+        pause_listening_history,
+        pause_search_history,
+        history_duration_seconds,
         lastfm_scrobbling,
         lastfm_now_playing,
         lastfm_sync_likes,
@@ -4289,7 +5673,10 @@ fn downloads(connection: &Connection) -> Result<Vec<AudioDownload>> {
                     d.updated_at_ms, d.completed_at_ms, d.last_error,
                     d.loudness_lufs_mb,
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM audio_download d
              JOIN song s ON s.video_id = d.video_id
              ORDER BY COALESCE(d.completed_at_ms, d.updated_at_ms) DESC, d.video_id ASC",
@@ -4310,7 +5697,10 @@ fn download_by_id(connection: &Connection, video_id: &str) -> Result<Option<Audi
                     d.updated_at_ms, d.completed_at_ms, d.last_error,
                     d.loudness_lufs_mb,
                     s.video_id, s.title, s.artists_json, s.duration_ms, s.thumbnail_url,
-                    s.is_episode
+                    s.is_episode,
+                    (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
+                    (SELECT title FROM song_album WHERE video_id = s.video_id),
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
              FROM audio_download d
              JOIN song s ON s.video_id = d.video_id
              WHERE d.video_id = ?1",
@@ -4387,6 +5777,9 @@ fn song_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Son
         )
     })?;
     let duration_ms: Option<i64> = row.get(offset + 3)?;
+    let album_browse_id: Option<String> = row.get(offset + 6)?;
+    let album_title: Option<String> = row.get(offset + 7)?;
+    let album_thumbnail_url: Option<String> = row.get(offset + 8)?;
     Ok(Song {
         video_id: row.get(offset)?,
         title: row.get(offset + 1)?,
@@ -4395,7 +5788,13 @@ fn song_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Son
             .and_then(|value| u64::try_from(value).ok())
             .map(Duration::from_millis),
         thumbnail_url: row.get(offset + 4)?,
-        album: None,
+        album: album_browse_id
+            .zip(album_title)
+            .map(|(browse_id, title)| AlbumCredit {
+                browse_id,
+                title,
+                thumbnail_url: album_thumbnail_url,
+            }),
         is_episode: row.get(offset + 5)?,
     })
 }
@@ -5868,6 +7267,8 @@ mod tests {
                 username: "listener".into(),
                 password: "fixture-secret".into(),
             },
+            content_language: "zh-CN".into(),
+            content_country: "HK".into(),
             audio_quality: AudioQuality::Low,
             audio_normalization: false,
             loudness_level: LoudnessLevel::Quiet,
@@ -5884,7 +7285,30 @@ mod tests {
             cache_root: std::env::temp_dir().join("metrolist-settings-cache-one"),
             audio_cache_bytes: 256 * 1024 * 1024,
             auto_radio: false,
+            auto_radio_queue: false,
+            auto_load_more: false,
+            sleep_timer_stop_after_current_song: true,
+            sleep_timer_fade_out: true,
+            skip_silence: true,
+            skip_silence_instant: true,
+            crossfade: true,
+            crossfade_seconds: 12,
+            crossfade_gapless_albums: false,
+            persistent_queue: false,
+            autoplay: false,
+            auto_skip_next_on_error: true,
+            auto_download_on_like: true,
+            pause_on_mute: true,
+            progressive_seek: true,
+            persistent_shuffle_across_queues: true,
+            shuffle_playlist_first: true,
+            remember_shuffle_and_repeat: false,
+            disable_load_more_when_repeat_all: true,
+            prevent_duplicate_tracks_in_queue: true,
             youtube_history_sync: false,
+            pause_listening_history: true,
+            pause_search_history: false,
+            history_duration_seconds: 45,
             lastfm_scrobbling: true,
             lastfm_now_playing: true,
             lastfm_sync_likes: true,
@@ -5919,6 +7343,8 @@ mod tests {
         );
         let replacement = AppSettings {
             proxy: ProxySettings::default(),
+            content_language: "en-GB".into(),
+            content_country: "GB".into(),
             audio_quality: AudioQuality::High,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Loud,
@@ -5935,7 +7361,30 @@ mod tests {
             cache_root: std::env::temp_dir().join("metrolist-settings-cache-two"),
             audio_cache_bytes: 1024 * 1024 * 1024,
             auto_radio: true,
+            auto_radio_queue: true,
+            auto_load_more: true,
+            sleep_timer_stop_after_current_song: false,
+            sleep_timer_fade_out: false,
+            skip_silence: false,
+            skip_silence_instant: false,
+            crossfade: false,
+            crossfade_seconds: 5,
+            crossfade_gapless_albums: true,
+            persistent_queue: true,
+            autoplay: true,
+            auto_skip_next_on_error: false,
+            auto_download_on_like: false,
+            pause_on_mute: false,
+            progressive_seek: false,
+            persistent_shuffle_across_queues: false,
+            shuffle_playlist_first: false,
+            remember_shuffle_and_repeat: true,
+            disable_load_more_when_repeat_all: false,
+            prevent_duplicate_tracks_in_queue: false,
             youtube_history_sync: true,
+            pause_listening_history: false,
+            pause_search_history: true,
+            history_duration_seconds: 12,
             lastfm_scrobbling: false,
             lastfm_now_playing: false,
             lastfm_sync_likes: false,
@@ -6033,6 +7482,8 @@ mod tests {
         let store = DesktopStore::open(&path).unwrap();
         let valid = AppSettings {
             proxy: ProxySettings::default(),
+            content_language: crate::config::SYSTEM_CONTENT_LOCALE.into(),
+            content_country: crate::config::SYSTEM_CONTENT_LOCALE.into(),
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,
@@ -6041,7 +7492,30 @@ mod tests {
             cache_root: std::env::temp_dir().join("metrolist-valid-cache"),
             audio_cache_bytes: 512 * 1024 * 1024,
             auto_radio: true,
+            auto_radio_queue: true,
+            auto_load_more: true,
+            sleep_timer_stop_after_current_song: false,
+            sleep_timer_fade_out: false,
+            skip_silence: false,
+            skip_silence_instant: false,
+            crossfade: false,
+            crossfade_seconds: 5,
+            crossfade_gapless_albums: true,
+            persistent_queue: true,
+            autoplay: true,
+            auto_skip_next_on_error: false,
+            auto_download_on_like: false,
+            pause_on_mute: false,
+            progressive_seek: false,
+            persistent_shuffle_across_queues: false,
+            shuffle_playlist_first: false,
+            remember_shuffle_and_repeat: true,
+            disable_load_more_when_repeat_all: false,
+            prevent_duplicate_tracks_in_queue: false,
             youtube_history_sync: true,
+            pause_listening_history: false,
+            pause_search_history: false,
+            history_duration_seconds: 30,
             lastfm_scrobbling: false,
             lastfm_now_playing: false,
             lastfm_sync_likes: false,

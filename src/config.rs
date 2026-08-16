@@ -14,6 +14,826 @@ pub const MIN_WINDOW_WIDTH: f32 = 720.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 520.0;
 pub const MIN_AUDIO_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_AUDIO_CACHE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+pub const MIN_HISTORY_DURATION_SECONDS: u16 = 1;
+pub const MAX_HISTORY_DURATION_SECONDS: u16 = 100;
+pub const DEFAULT_HISTORY_DURATION_SECONDS: u16 = 30;
+pub const MIN_CROSSFADE_SECONDS: u8 = 1;
+pub const MAX_CROSSFADE_SECONDS: u8 = 15;
+pub const DEFAULT_CROSSFADE_SECONDS: u8 = 5;
+pub const SYSTEM_CONTENT_LOCALE: &str = "system";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentLocaleOption {
+    pub code: &'static str,
+    pub name: &'static str,
+}
+
+pub const CONTENT_LANGUAGES: &[ContentLocaleOption] = &[
+    ContentLocaleOption {
+        code: "af",
+        name: "Afrikaans",
+    },
+    ContentLocaleOption {
+        code: "az",
+        name: "Azərbaycan",
+    },
+    ContentLocaleOption {
+        code: "id",
+        name: "Bahasa Indonesia",
+    },
+    ContentLocaleOption {
+        code: "ms",
+        name: "Bahasa Malaysia",
+    },
+    ContentLocaleOption {
+        code: "ca",
+        name: "Català",
+    },
+    ContentLocaleOption {
+        code: "cs",
+        name: "Čeština",
+    },
+    ContentLocaleOption {
+        code: "da",
+        name: "Dansk",
+    },
+    ContentLocaleOption {
+        code: "de",
+        name: "Deutsch",
+    },
+    ContentLocaleOption {
+        code: "et",
+        name: "Eesti",
+    },
+    ContentLocaleOption {
+        code: "en-GB",
+        name: "English (UK)",
+    },
+    ContentLocaleOption {
+        code: "en",
+        name: "English (US)",
+    },
+    ContentLocaleOption {
+        code: "es",
+        name: "Español (España)",
+    },
+    ContentLocaleOption {
+        code: "es-419",
+        name: "Español (Latinoamérica)",
+    },
+    ContentLocaleOption {
+        code: "eu",
+        name: "Euskara",
+    },
+    ContentLocaleOption {
+        code: "fil",
+        name: "Filipino",
+    },
+    ContentLocaleOption {
+        code: "fr",
+        name: "Français",
+    },
+    ContentLocaleOption {
+        code: "fr-CA",
+        name: "Français (Canada)",
+    },
+    ContentLocaleOption {
+        code: "gl",
+        name: "Galego",
+    },
+    ContentLocaleOption {
+        code: "hr",
+        name: "Hrvatski",
+    },
+    ContentLocaleOption {
+        code: "zu",
+        name: "IsiZulu",
+    },
+    ContentLocaleOption {
+        code: "is",
+        name: "Íslenska",
+    },
+    ContentLocaleOption {
+        code: "it",
+        name: "Italiano",
+    },
+    ContentLocaleOption {
+        code: "sw",
+        name: "Kiswahili",
+    },
+    ContentLocaleOption {
+        code: "lt",
+        name: "Lietuvių",
+    },
+    ContentLocaleOption {
+        code: "hu",
+        name: "Magyar",
+    },
+    ContentLocaleOption {
+        code: "nl",
+        name: "Nederlands",
+    },
+    ContentLocaleOption {
+        code: "no",
+        name: "Norsk",
+    },
+    ContentLocaleOption {
+        code: "or",
+        name: "Odia",
+    },
+    ContentLocaleOption {
+        code: "uz",
+        name: "O‘zbe",
+    },
+    ContentLocaleOption {
+        code: "pl",
+        name: "Polski",
+    },
+    ContentLocaleOption {
+        code: "pt-PT",
+        name: "Português",
+    },
+    ContentLocaleOption {
+        code: "pt",
+        name: "Português (Brasil)",
+    },
+    ContentLocaleOption {
+        code: "ro",
+        name: "Română",
+    },
+    ContentLocaleOption {
+        code: "sq",
+        name: "Shqip",
+    },
+    ContentLocaleOption {
+        code: "sk",
+        name: "Slovenčina",
+    },
+    ContentLocaleOption {
+        code: "sl",
+        name: "Slovenščina",
+    },
+    ContentLocaleOption {
+        code: "fi",
+        name: "Suomi",
+    },
+    ContentLocaleOption {
+        code: "sv",
+        name: "Svenska",
+    },
+    ContentLocaleOption {
+        code: "bo",
+        name: "Tibetan བོད་སྐད།",
+    },
+    ContentLocaleOption {
+        code: "vi",
+        name: "Tiếng Việt",
+    },
+    ContentLocaleOption {
+        code: "tr",
+        name: "Türkçe",
+    },
+    ContentLocaleOption {
+        code: "bg",
+        name: "Български",
+    },
+    ContentLocaleOption {
+        code: "ky",
+        name: "Кыргызча",
+    },
+    ContentLocaleOption {
+        code: "kk",
+        name: "Қазақ Тілі",
+    },
+    ContentLocaleOption {
+        code: "mk",
+        name: "Македонски",
+    },
+    ContentLocaleOption {
+        code: "mn",
+        name: "Монгол",
+    },
+    ContentLocaleOption {
+        code: "ru",
+        name: "Русский",
+    },
+    ContentLocaleOption {
+        code: "sr",
+        name: "Српски",
+    },
+    ContentLocaleOption {
+        code: "uk",
+        name: "Українська",
+    },
+    ContentLocaleOption {
+        code: "el",
+        name: "Ελληνικά",
+    },
+    ContentLocaleOption {
+        code: "hy",
+        name: "Հայերեն",
+    },
+    ContentLocaleOption {
+        code: "iw",
+        name: "עברית",
+    },
+    ContentLocaleOption {
+        code: "ur",
+        name: "اردو",
+    },
+    ContentLocaleOption {
+        code: "ar",
+        name: "العربية",
+    },
+    ContentLocaleOption {
+        code: "fa",
+        name: "فارسی",
+    },
+    ContentLocaleOption {
+        code: "ne",
+        name: "नेपाली",
+    },
+    ContentLocaleOption {
+        code: "mr",
+        name: "मराठी",
+    },
+    ContentLocaleOption {
+        code: "hi",
+        name: "हिन्दी",
+    },
+    ContentLocaleOption {
+        code: "bn",
+        name: "বাংলা",
+    },
+    ContentLocaleOption {
+        code: "pa",
+        name: "ਪੰਜਾਬੀ",
+    },
+    ContentLocaleOption {
+        code: "gu",
+        name: "ગુજરાતી",
+    },
+    ContentLocaleOption {
+        code: "ta",
+        name: "தமிழ்",
+    },
+    ContentLocaleOption {
+        code: "te",
+        name: "తెలుగు",
+    },
+    ContentLocaleOption {
+        code: "kn",
+        name: "ಕನ್ನಡ",
+    },
+    ContentLocaleOption {
+        code: "ml",
+        name: "മലയാളം",
+    },
+    ContentLocaleOption {
+        code: "si",
+        name: "සිංහල",
+    },
+    ContentLocaleOption {
+        code: "th",
+        name: "ภาษาไทย",
+    },
+    ContentLocaleOption {
+        code: "lo",
+        name: "ລາວ",
+    },
+    ContentLocaleOption {
+        code: "my",
+        name: "ဗမာ",
+    },
+    ContentLocaleOption {
+        code: "ka",
+        name: "ქართული",
+    },
+    ContentLocaleOption {
+        code: "am",
+        name: "አማርኛ",
+    },
+    ContentLocaleOption {
+        code: "km",
+        name: "ខ្មែរ",
+    },
+    ContentLocaleOption {
+        code: "zh-CN",
+        name: "中文 (简体)",
+    },
+    ContentLocaleOption {
+        code: "zh-TW",
+        name: "中文 (繁體)",
+    },
+    ContentLocaleOption {
+        code: "zh-HK",
+        name: "中文 (香港)",
+    },
+    ContentLocaleOption {
+        code: "ja",
+        name: "日本語",
+    },
+    ContentLocaleOption {
+        code: "ko",
+        name: "한국어",
+    },
+];
+
+pub const CONTENT_COUNTRIES: &[ContentLocaleOption] = &[
+    ContentLocaleOption {
+        code: "DZ",
+        name: "Algeria",
+    },
+    ContentLocaleOption {
+        code: "AR",
+        name: "Argentina",
+    },
+    ContentLocaleOption {
+        code: "AU",
+        name: "Australia",
+    },
+    ContentLocaleOption {
+        code: "AT",
+        name: "Austria",
+    },
+    ContentLocaleOption {
+        code: "AZ",
+        name: "Azerbaijan",
+    },
+    ContentLocaleOption {
+        code: "BH",
+        name: "Bahrain",
+    },
+    ContentLocaleOption {
+        code: "BD",
+        name: "Bangladesh",
+    },
+    ContentLocaleOption {
+        code: "BY",
+        name: "Belarus",
+    },
+    ContentLocaleOption {
+        code: "BE",
+        name: "Belgium",
+    },
+    ContentLocaleOption {
+        code: "BO",
+        name: "Bolivia",
+    },
+    ContentLocaleOption {
+        code: "BA",
+        name: "Bosnia and Herzegovina",
+    },
+    ContentLocaleOption {
+        code: "BR",
+        name: "Brazil",
+    },
+    ContentLocaleOption {
+        code: "BG",
+        name: "Bulgaria",
+    },
+    ContentLocaleOption {
+        code: "KH",
+        name: "Cambodia",
+    },
+    ContentLocaleOption {
+        code: "CA",
+        name: "Canada",
+    },
+    ContentLocaleOption {
+        code: "CL",
+        name: "Chile",
+    },
+    ContentLocaleOption {
+        code: "HK",
+        name: "Hong Kong",
+    },
+    ContentLocaleOption {
+        code: "CO",
+        name: "Colombia",
+    },
+    ContentLocaleOption {
+        code: "CR",
+        name: "Costa Rica",
+    },
+    ContentLocaleOption {
+        code: "HR",
+        name: "Croatia",
+    },
+    ContentLocaleOption {
+        code: "CY",
+        name: "Cyprus",
+    },
+    ContentLocaleOption {
+        code: "CZ",
+        name: "Czech Republic",
+    },
+    ContentLocaleOption {
+        code: "DK",
+        name: "Denmark",
+    },
+    ContentLocaleOption {
+        code: "DO",
+        name: "Dominican Republic",
+    },
+    ContentLocaleOption {
+        code: "EC",
+        name: "Ecuador",
+    },
+    ContentLocaleOption {
+        code: "EG",
+        name: "Egypt",
+    },
+    ContentLocaleOption {
+        code: "SV",
+        name: "El Salvador",
+    },
+    ContentLocaleOption {
+        code: "EE",
+        name: "Estonia",
+    },
+    ContentLocaleOption {
+        code: "FI",
+        name: "Finland",
+    },
+    ContentLocaleOption {
+        code: "FR",
+        name: "France",
+    },
+    ContentLocaleOption {
+        code: "GE",
+        name: "Georgia",
+    },
+    ContentLocaleOption {
+        code: "DE",
+        name: "Germany",
+    },
+    ContentLocaleOption {
+        code: "GH",
+        name: "Ghana",
+    },
+    ContentLocaleOption {
+        code: "GR",
+        name: "Greece",
+    },
+    ContentLocaleOption {
+        code: "GT",
+        name: "Guatemala",
+    },
+    ContentLocaleOption {
+        code: "HN",
+        name: "Honduras",
+    },
+    ContentLocaleOption {
+        code: "HU",
+        name: "Hungary",
+    },
+    ContentLocaleOption {
+        code: "IS",
+        name: "Iceland",
+    },
+    ContentLocaleOption {
+        code: "IN",
+        name: "India",
+    },
+    ContentLocaleOption {
+        code: "ID",
+        name: "Indonesia",
+    },
+    ContentLocaleOption {
+        code: "IQ",
+        name: "Iraq",
+    },
+    ContentLocaleOption {
+        code: "IE",
+        name: "Ireland",
+    },
+    ContentLocaleOption {
+        code: "IL",
+        name: "Israel",
+    },
+    ContentLocaleOption {
+        code: "IT",
+        name: "Italy",
+    },
+    ContentLocaleOption {
+        code: "JM",
+        name: "Jamaica",
+    },
+    ContentLocaleOption {
+        code: "JP",
+        name: "Japan",
+    },
+    ContentLocaleOption {
+        code: "JO",
+        name: "Jordan",
+    },
+    ContentLocaleOption {
+        code: "KZ",
+        name: "Kazakhstan",
+    },
+    ContentLocaleOption {
+        code: "KE",
+        name: "Kenya",
+    },
+    ContentLocaleOption {
+        code: "KR",
+        name: "South Korea",
+    },
+    ContentLocaleOption {
+        code: "KW",
+        name: "Kuwait",
+    },
+    ContentLocaleOption {
+        code: "LA",
+        name: "Lao",
+    },
+    ContentLocaleOption {
+        code: "LV",
+        name: "Latvia",
+    },
+    ContentLocaleOption {
+        code: "LB",
+        name: "Lebanon",
+    },
+    ContentLocaleOption {
+        code: "LY",
+        name: "Libya",
+    },
+    ContentLocaleOption {
+        code: "LI",
+        name: "Liechtenstein",
+    },
+    ContentLocaleOption {
+        code: "LT",
+        name: "Lithuania",
+    },
+    ContentLocaleOption {
+        code: "LU",
+        name: "Luxembourg",
+    },
+    ContentLocaleOption {
+        code: "MK",
+        name: "Macedonia",
+    },
+    ContentLocaleOption {
+        code: "MY",
+        name: "Malaysia",
+    },
+    ContentLocaleOption {
+        code: "MT",
+        name: "Malta",
+    },
+    ContentLocaleOption {
+        code: "MX",
+        name: "Mexico",
+    },
+    ContentLocaleOption {
+        code: "ME",
+        name: "Montenegro",
+    },
+    ContentLocaleOption {
+        code: "MA",
+        name: "Morocco",
+    },
+    ContentLocaleOption {
+        code: "NP",
+        name: "Nepal",
+    },
+    ContentLocaleOption {
+        code: "NL",
+        name: "Netherlands",
+    },
+    ContentLocaleOption {
+        code: "NZ",
+        name: "New Zealand",
+    },
+    ContentLocaleOption {
+        code: "NI",
+        name: "Nicaragua",
+    },
+    ContentLocaleOption {
+        code: "NG",
+        name: "Nigeria",
+    },
+    ContentLocaleOption {
+        code: "NO",
+        name: "Norway",
+    },
+    ContentLocaleOption {
+        code: "OM",
+        name: "Oman",
+    },
+    ContentLocaleOption {
+        code: "PK",
+        name: "Pakistan",
+    },
+    ContentLocaleOption {
+        code: "PA",
+        name: "Panama",
+    },
+    ContentLocaleOption {
+        code: "PG",
+        name: "Papua New Guinea",
+    },
+    ContentLocaleOption {
+        code: "PY",
+        name: "Paraguay",
+    },
+    ContentLocaleOption {
+        code: "PE",
+        name: "Peru",
+    },
+    ContentLocaleOption {
+        code: "PH",
+        name: "Philippines",
+    },
+    ContentLocaleOption {
+        code: "PL",
+        name: "Poland",
+    },
+    ContentLocaleOption {
+        code: "PT",
+        name: "Portugal",
+    },
+    ContentLocaleOption {
+        code: "PR",
+        name: "Puerto Rico",
+    },
+    ContentLocaleOption {
+        code: "QA",
+        name: "Qatar",
+    },
+    ContentLocaleOption {
+        code: "RO",
+        name: "Romania",
+    },
+    ContentLocaleOption {
+        code: "RU",
+        name: "Russian Federation",
+    },
+    ContentLocaleOption {
+        code: "SA",
+        name: "Saudi Arabia",
+    },
+    ContentLocaleOption {
+        code: "SN",
+        name: "Senegal",
+    },
+    ContentLocaleOption {
+        code: "RS",
+        name: "Serbia",
+    },
+    ContentLocaleOption {
+        code: "SG",
+        name: "Singapore",
+    },
+    ContentLocaleOption {
+        code: "SK",
+        name: "Slovakia",
+    },
+    ContentLocaleOption {
+        code: "SI",
+        name: "Slovenia",
+    },
+    ContentLocaleOption {
+        code: "ZA",
+        name: "South Africa",
+    },
+    ContentLocaleOption {
+        code: "ES",
+        name: "Spain",
+    },
+    ContentLocaleOption {
+        code: "LK",
+        name: "Sri Lanka",
+    },
+    ContentLocaleOption {
+        code: "SE",
+        name: "Sweden",
+    },
+    ContentLocaleOption {
+        code: "CH",
+        name: "Switzerland",
+    },
+    ContentLocaleOption {
+        code: "TW",
+        name: "Taiwan",
+    },
+    ContentLocaleOption {
+        code: "TZ",
+        name: "Tanzania",
+    },
+    ContentLocaleOption {
+        code: "TH",
+        name: "Thailand",
+    },
+    ContentLocaleOption {
+        code: "TN",
+        name: "Tunisia",
+    },
+    ContentLocaleOption {
+        code: "TR",
+        name: "Turkey",
+    },
+    ContentLocaleOption {
+        code: "UG",
+        name: "Uganda",
+    },
+    ContentLocaleOption {
+        code: "UA",
+        name: "Ukraine",
+    },
+    ContentLocaleOption {
+        code: "AE",
+        name: "United Arab Emirates",
+    },
+    ContentLocaleOption {
+        code: "GB",
+        name: "United Kingdom",
+    },
+    ContentLocaleOption {
+        code: "US",
+        name: "United States",
+    },
+    ContentLocaleOption {
+        code: "UY",
+        name: "Uruguay",
+    },
+    ContentLocaleOption {
+        code: "VE",
+        name: "Venezuela (Bolivarian Republic)",
+    },
+    ContentLocaleOption {
+        code: "VN",
+        name: "Vietnam",
+    },
+    ContentLocaleOption {
+        code: "YE",
+        name: "Yemen",
+    },
+    ContentLocaleOption {
+        code: "ZW",
+        name: "Zimbabwe",
+    },
+];
+
+pub fn content_language_name(code: &str) -> Option<&'static str> {
+    CONTENT_LANGUAGES
+        .iter()
+        .find(|option| option.code == code)
+        .map(|option| option.name)
+}
+
+pub fn content_country_name(code: &str) -> Option<&'static str> {
+    CONTENT_COUNTRIES
+        .iter()
+        .find(|option| option.code == code)
+        .map(|option| option.name)
+}
+
+fn system_locale_parts() -> (String, String) {
+    let locale = sys_locale::get_locale()
+        .unwrap_or_else(|| "en-US".into())
+        .split(['.', '@'])
+        .next()
+        .unwrap_or("en-US")
+        .replace('_', "-");
+    let locale_country = locale
+        .split('-')
+        .skip(1)
+        .find(|part| {
+            part.len() == 2
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+        })
+        .map(str::to_ascii_uppercase);
+    let country = locale_country
+        .clone()
+        .filter(|code| content_country_name(code).is_some())
+        .unwrap_or_else(|| "US".into());
+    let language = CONTENT_LANGUAGES
+        .iter()
+        .find(|option| option.code.eq_ignore_ascii_case(&locale))
+        .or_else(|| {
+            let primary = locale.split('-').next().unwrap_or("en");
+            let regional = format!("{primary}-{}", locale_country.as_deref().unwrap_or("US"));
+            CONTENT_LANGUAGES
+                .iter()
+                .find(|option| option.code.eq_ignore_ascii_case(&regional))
+        })
+        .or_else(|| {
+            let primary = locale.split('-').next().unwrap_or("en");
+            CONTENT_LANGUAGES
+                .iter()
+                .find(|option| option.code.eq_ignore_ascii_case(primary))
+        })
+        .map(|option| option.code)
+        .unwrap_or("en")
+        .to_owned();
+    (language, country)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AudioQuality {
@@ -644,6 +1464,8 @@ impl ListenTogetherSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
     pub proxy: ProxySettings,
+    pub content_language: String,
+    pub content_country: String,
     pub audio_quality: AudioQuality,
     pub audio_normalization: bool,
     pub loudness_level: LoudnessLevel,
@@ -652,7 +1474,30 @@ pub struct AppSettings {
     pub cache_root: PathBuf,
     pub audio_cache_bytes: u64,
     pub auto_radio: bool,
+    pub auto_radio_queue: bool,
+    pub auto_load_more: bool,
+    pub sleep_timer_stop_after_current_song: bool,
+    pub sleep_timer_fade_out: bool,
+    pub persistent_queue: bool,
+    pub autoplay: bool,
+    pub auto_skip_next_on_error: bool,
+    pub auto_download_on_like: bool,
+    pub pause_on_mute: bool,
+    pub progressive_seek: bool,
+    pub skip_silence: bool,
+    pub skip_silence_instant: bool,
+    pub crossfade: bool,
+    pub crossfade_seconds: u8,
+    pub crossfade_gapless_albums: bool,
+    pub persistent_shuffle_across_queues: bool,
+    pub shuffle_playlist_first: bool,
+    pub remember_shuffle_and_repeat: bool,
+    pub prevent_duplicate_tracks_in_queue: bool,
+    pub disable_load_more_when_repeat_all: bool,
     pub youtube_history_sync: bool,
+    pub pause_listening_history: bool,
+    pub pause_search_history: bool,
+    pub history_duration_seconds: u16,
     pub lastfm_scrobbling: bool,
     pub lastfm_now_playing: bool,
     pub lastfm_sync_likes: bool,
@@ -671,6 +1516,8 @@ impl AppSettings {
             .join("metrolist");
         Self {
             proxy: ProxySettings::default(),
+            content_language: SYSTEM_CONTENT_LOCALE.into(),
+            content_country: SYSTEM_CONTENT_LOCALE.into(),
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,
@@ -679,7 +1526,30 @@ impl AppSettings {
             cache_root,
             audio_cache_bytes,
             auto_radio: true,
+            auto_radio_queue: true,
+            auto_load_more: true,
+            sleep_timer_stop_after_current_song: false,
+            sleep_timer_fade_out: false,
+            persistent_queue: true,
+            autoplay: true,
+            auto_skip_next_on_error: false,
+            auto_download_on_like: false,
+            pause_on_mute: false,
+            progressive_seek: false,
+            skip_silence: false,
+            skip_silence_instant: false,
+            crossfade: false,
+            crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
+            crossfade_gapless_albums: true,
+            persistent_shuffle_across_queues: false,
+            shuffle_playlist_first: false,
+            remember_shuffle_and_repeat: true,
+            prevent_duplicate_tracks_in_queue: false,
+            disable_load_more_when_repeat_all: false,
             youtube_history_sync: true,
+            pause_listening_history: false,
+            pause_search_history: false,
+            history_duration_seconds: DEFAULT_HISTORY_DURATION_SECONDS,
             lastfm_scrobbling: false,
             lastfm_now_playing: false,
             lastfm_sync_likes: false,
@@ -693,6 +1563,33 @@ impl AppSettings {
 
     pub fn validate(mut self) -> Result<Self> {
         self.proxy.resolved_url()?;
+        self.content_language = self.content_language.trim().to_owned();
+        self.content_country = self.content_country.trim().to_owned();
+        if self
+            .content_language
+            .eq_ignore_ascii_case(SYSTEM_CONTENT_LOCALE)
+        {
+            self.content_language = SYSTEM_CONTENT_LOCALE.into();
+        } else if content_language_name(&self.content_language).is_none() {
+            return Err(AppError::InvalidConfig(format!(
+                "unknown content language '{}'",
+                self.content_language
+            )));
+        }
+        if self
+            .content_country
+            .eq_ignore_ascii_case(SYSTEM_CONTENT_LOCALE)
+        {
+            self.content_country = SYSTEM_CONTENT_LOCALE.into();
+        } else {
+            self.content_country = self.content_country.to_ascii_uppercase();
+            if content_country_name(&self.content_country).is_none() {
+                return Err(AppError::InvalidConfig(format!(
+                    "unknown content country or region '{}'",
+                    self.content_country
+                )));
+            }
+        }
         if !self.equalizer.enabled {
             self.equalizer.active_profile = None;
         }
@@ -717,11 +1614,39 @@ impl AppSettings {
                 MAX_AUDIO_CACHE_BYTES / 1024 / 1024 / 1024
             )));
         }
+        if !(MIN_HISTORY_DURATION_SECONDS..=MAX_HISTORY_DURATION_SECONDS)
+            .contains(&self.history_duration_seconds)
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "listening history duration must be between {MIN_HISTORY_DURATION_SECONDS} and {MAX_HISTORY_DURATION_SECONDS} seconds"
+            )));
+        }
+        if !(MIN_CROSSFADE_SECONDS..=MAX_CROSSFADE_SECONDS).contains(&self.crossfade_seconds) {
+            return Err(AppError::InvalidConfig(format!(
+                "crossfade duration must be between {MIN_CROSSFADE_SECONDS} and {MAX_CROSSFADE_SECONDS} seconds"
+            )));
+        }
         Ok(self)
     }
 
     pub fn audio_cache_root(&self) -> PathBuf {
         self.cache_root.join("audio")
+    }
+
+    pub fn resolved_content_language(&self) -> String {
+        if self.content_language == SYSTEM_CONTENT_LOCALE {
+            system_locale_parts().0
+        } else {
+            self.content_language.clone()
+        }
+    }
+
+    pub fn resolved_content_country(&self) -> String {
+        if self.content_country == SYSTEM_CONTENT_LOCALE {
+            system_locale_parts().1
+        } else {
+            self.content_country.clone()
+        }
     }
 
     pub fn thumbnail_cache_root(&self) -> PathBuf {
@@ -836,6 +1761,8 @@ mod tests {
     fn settings_require_a_safe_absolute_cache_root() {
         let settings = AppSettings {
             proxy: ProxySettings::default(),
+            content_language: SYSTEM_CONTENT_LOCALE.into(),
+            content_country: SYSTEM_CONTENT_LOCALE.into(),
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,
@@ -844,7 +1771,30 @@ mod tests {
             cache_root: "relative/cache".into(),
             audio_cache_bytes: DEFAULT_AUDIO_CACHE_BYTES,
             auto_radio: true,
+            auto_radio_queue: true,
+            auto_load_more: true,
+            sleep_timer_stop_after_current_song: false,
+            sleep_timer_fade_out: false,
+            persistent_queue: true,
+            autoplay: true,
+            auto_skip_next_on_error: false,
+            auto_download_on_like: false,
+            pause_on_mute: false,
+            progressive_seek: false,
+            skip_silence: false,
+            skip_silence_instant: false,
+            crossfade: false,
+            crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
+            crossfade_gapless_albums: true,
+            persistent_shuffle_across_queues: false,
+            shuffle_playlist_first: false,
+            remember_shuffle_and_repeat: true,
+            prevent_duplicate_tracks_in_queue: false,
+            disable_load_more_when_repeat_all: false,
             youtube_history_sync: true,
+            pause_listening_history: false,
+            pause_search_history: false,
+            history_duration_seconds: DEFAULT_HISTORY_DURATION_SECONDS,
             lastfm_scrobbling: false,
             lastfm_now_playing: false,
             lastfm_sync_likes: false,

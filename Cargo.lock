@@ -33,6 +33,7 @@ dependencies = [
  "sha1 0.10.7",
  "souvlaki",
  "symphonia 0.6.1",
+ "sys-locale",
  "tao",
  "thiserror 2.0.20",
  "tracing",
