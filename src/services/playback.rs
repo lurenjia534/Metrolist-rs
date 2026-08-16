@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt,
     io::{self, Cursor, Read, Seek, SeekFrom},
     sync::{Arc, Mutex},
@@ -562,11 +563,15 @@ impl Default for PlaybackSnapshot {
 
 pub trait AudioPlayer: Send {
     fn load(&mut self, source: PlaybackSource) -> Result<()>;
+    fn load_with_crossfade(&mut self, source: PlaybackSource, _duration: Duration) -> Result<()> {
+        self.load(source)
+    }
     fn play(&mut self) -> Result<()>;
     fn pause(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
     fn seek(&mut self, position: Duration) -> Result<()>;
     fn set_volume(&mut self, volume: f32);
+    fn set_volume_multiplier(&mut self, _multiplier: f32) {}
     fn set_playback_parameters(&mut self, _parameters: PlaybackParameters) -> Result<()> {
         Err(crate::AppError::Playback(
             "live playback parameter changes are unavailable for this backend".into(),
@@ -644,7 +649,7 @@ impl RepeatMode {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Queue {
     items: Vec<QueueItem>,
     current: Option<usize>,
@@ -715,6 +720,28 @@ impl Queue {
         let keep = self.current.map_or(0, |index| index.saturating_add(1));
         let removed = self.items.len().saturating_sub(keep);
         self.items.truncate(keep);
+        removed
+    }
+
+    pub fn remove_video_ids_except_current<'a>(
+        &mut self,
+        video_ids: impl IntoIterator<Item = &'a str>,
+    ) -> usize {
+        let video_ids = video_ids.into_iter().collect::<HashSet<_>>();
+        let current = self.current;
+        let indices = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (Some(index) != current && video_ids.contains(item.song.video_id.as_str()))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let removed = indices.len();
+        for index in indices.into_iter().rev() {
+            self.remove(index);
+        }
         removed
     }
 
@@ -807,6 +834,23 @@ impl Queue {
         if start < self.items.len() {
             fastrand::shuffle(&mut self.items[start..]);
         }
+    }
+
+    pub fn shuffle_upcoming_partitioned(&mut self, primary_len: usize) {
+        let Some(start) = self.current.and_then(|index| index.checked_add(1)) else {
+            return;
+        };
+        let len = self.items.len();
+        let start = start.min(len);
+        let split = primary_len.clamp(start, len);
+        fastrand::shuffle(&mut self.items[start..split]);
+        fastrand::shuffle(&mut self.items[split..]);
+    }
+
+    pub fn shuffle_all_partitioned(&mut self, primary_len: usize) {
+        let split = primary_len.min(self.items.len());
+        fastrand::shuffle(&mut self.items[..split]);
+        fastrand::shuffle(&mut self.items[split..]);
     }
 
     fn shuffle_around_current_with_rng(&mut self, rng: &mut fastrand::Rng) {

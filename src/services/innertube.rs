@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::domain::{
     AlbumCredit, ArtistCredit, BrowseContinuation, BrowseItem, BrowseKind, BrowsePage,
-    ChannelSubscription, ExploreCategory, ExplorePage, HomeChip, HomeItem, HomePage, HomeSection,
-    PlaylistEntry, RemoteHistoryEntry, RemoteHistoryPage, RemoteHistorySection, Song,
+    BrowsePlaybackEndpoint, ChannelSubscription, ExploreCategory, ExplorePage, HomeChip, HomeItem,
+    HomePage, HomeSection, PlaylistEntry, RemoteHistoryEntry, RemoteHistoryPage,
+    RemoteHistorySection, Song,
 };
 use crate::services::auth::AuthSession;
 use crate::services::build_http_client;
@@ -32,6 +33,10 @@ const USER_AGENT: &str =
 const CLIENT_NAME: &str = "WEB_REMIX";
 const CLIENT_ID: &str = "67";
 const CLIENT_VERSION: &str = "1.20260114.03.00";
+const WEB_CLIENT_NAME: &str = "WEB";
+const WEB_CLIENT_ID: &str = "1";
+const WEB_CLIENT_VERSION: &str = "2.20260114.08.00";
+const RETURN_YOUTUBE_DISLIKE_API: &str = "https://returnyoutubedislikeapi.com/Votes";
 const SONG_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const VIDEO_FILTER: &str = "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D";
 const ALBUM_FILTER: &str = "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D";
@@ -120,6 +125,20 @@ pub struct AccountProfile {
     pub thumbnail_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaInfo {
+    pub video_id: String,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub author_id: Option<String>,
+    pub description: Option<String>,
+    pub upload_date: Option<String>,
+    pub subscribers: Option<String>,
+    pub view_count: Option<u64>,
+    pub likes: Option<u64>,
+    pub dislikes: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RadioEndpoint {
@@ -159,6 +178,18 @@ impl RadioEndpoint {
             playlist_set_video_id: None,
             params: None,
             index: None,
+        }
+    }
+}
+
+impl From<BrowsePlaybackEndpoint> for RadioEndpoint {
+    fn from(endpoint: BrowsePlaybackEndpoint) -> Self {
+        Self {
+            video_id: endpoint.video_id,
+            playlist_id: endpoint.playlist_id,
+            playlist_set_video_id: endpoint.playlist_set_video_id,
+            params: endpoint.params,
+            index: endpoint.index,
         }
     }
 }
@@ -362,8 +393,10 @@ impl InnerTubeClient {
         Self::new(session, http, AudioQuality::Auto)
     }
 
-    pub fn with_settings(session: InnerTubeSession, settings: &AppSettings) -> Result<Self> {
+    pub fn with_settings(mut session: InnerTubeSession, settings: &AppSettings) -> Result<Self> {
         let http = build_http_client(&settings.proxy, USER_AGENT)?;
+        session.language = settings.resolved_content_language();
+        session.region = settings.resolved_content_country();
         Ok(Self::new(session, http, settings.audio_quality))
     }
 
@@ -703,7 +736,7 @@ impl InnerTubeClient {
         self.complete_browse_page(page).await
     }
 
-    async fn complete_browse_page(&self, mut page: BrowsePage) -> Result<BrowsePage> {
+    pub async fn complete_browse_page(&self, mut page: BrowsePage) -> Result<BrowsePage> {
         let mut seen = HashSet::new();
         for _ in 0..HISTORY_CONTINUATION_LIMIT {
             let Some(token) = page.continuation.clone() else {
@@ -965,6 +998,42 @@ impl InnerTubeClient {
         )
         .await
         .map(|_| ())
+    }
+
+    pub async fn set_song_in_library(&self, video_id: &str, in_library: bool) -> Result<()> {
+        let video_id = validated_identifier(video_id, "video id")?;
+        self.authenticated_context()?;
+        let response = self
+            .fetch_next_page(&RadioEndpoint::song(video_id), None)
+            .await?;
+        let feedback_token = parse_song_library_feedback_token(response, video_id, in_library)?;
+        let feedback_token = validated_feedback_token(&feedback_token)?;
+        let body = serde_json::to_vec(&FeedbackBody {
+            context: self.authenticated_context()?,
+            feedback_tokens: [feedback_token],
+        })
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+        let response = self
+            .send_authenticated_mutation("feedback", body, false)
+            .await?;
+        let response: FeedbackResponse = serde_json::from_slice(&response).map_err(|_| {
+            AppError::Protocol(
+                "song library update returned no usable result; refresh the account library before retrying"
+                    .into(),
+            )
+        })?;
+        if response.feedback_responses.len() == 1
+            && response
+                .feedback_responses
+                .iter()
+                .all(|response| response.is_processed)
+        {
+            Ok(())
+        } else {
+            Err(AppError::Protocol(
+                "YouTube Music did not process the song library update".into(),
+            ))
+        }
     }
 
     pub async fn set_playlist_liked(&self, playlist_id: &str, liked: bool) -> Result<()> {
@@ -1371,6 +1440,33 @@ impl InnerTubeClient {
         }))
     }
 
+    pub async fn queue_song(&self, video_id: &str) -> Result<Song> {
+        let video_id = video_id.trim();
+        if video_id.is_empty() {
+            return Err(AppError::Protocol("video id cannot be empty".into()));
+        }
+        let response = self.fetch_queue_song_page(video_id).await?;
+        parse_queue_song_response(response, video_id)
+    }
+
+    pub async fn media_info(&self, video_id: &str) -> Result<MediaInfo> {
+        let video_id = video_id.trim();
+        if video_id.is_empty() {
+            return Err(AppError::Protocol("video id cannot be empty".into()));
+        }
+        let (watch_page, public_counts) = futures::join!(
+            self.fetch_media_info_page(video_id),
+            self.fetch_public_video_counts(video_id),
+        );
+        let mut info = parse_media_info_response(watch_page?, video_id)?;
+        let counts: ReturnYoutubeDislikeResponse = serde_json::from_slice(&public_counts?)
+            .map_err(|error| AppError::Protocol(error.to_string()))?;
+        info.view_count = counts.view_count;
+        info.likes = counts.likes;
+        info.dislikes = counts.dislikes;
+        Ok(info)
+    }
+
     pub async fn radio(&self, seed_video_id: &str) -> Result<RadioPage> {
         let preferred = RadioEndpoint::song_radio(seed_video_id)?;
         let preferred_result = self.fetch_radio_chain(preferred, None).await;
@@ -1403,6 +1499,10 @@ impl InnerTubeClient {
             }
         }
         Ok(fallback)
+    }
+
+    pub async fn playback_queue(&self, endpoint: BrowsePlaybackEndpoint) -> Result<RadioPage> {
+        self.fetch_radio_chain(endpoint.into(), None).await
     }
 
     pub async fn radio_continuation(
@@ -1748,6 +1848,131 @@ impl InnerTubeClient {
         Ok(response_body)
     }
 
+    async fn fetch_queue_song_page(&self, video_id: &str) -> Result<Vec<u8>> {
+        let video_ids = [video_id];
+        let body = serde_json::to_vec(&GetQueueBody {
+            context: RequestContext {
+                client: ClientContext {
+                    client_name: CLIENT_NAME,
+                    client_version: CLIENT_VERSION,
+                    language: &self.session.language,
+                    region: &self.session.region,
+                    visitor_data: self.session.visitor_data.as_deref(),
+                },
+                request: RequestMetadata { use_ssl: true },
+                user: UserContext {
+                    locked_safety_mode: false,
+                    on_behalf_of_user: None,
+                },
+            },
+            video_ids: &video_ids,
+            playlist_id: None,
+        })
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_ROOT}/music/get_queue?prettyPrint=false"))
+            .header("Accept", "application/json")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Cache-Control", "no-cache")
+            .header("Content-Type", "application/json")
+            .header("X-Goog-Api-Format-Version", "1")
+            .header("X-YouTube-Client-Name", CLIENT_ID)
+            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .header("X-Origin", ORIGIN)
+            .header("Referer", format!("{ORIGIN}/"))
+            .when_some(self.session.visitor_data.as_deref(), |request, visitor| {
+                request.header("X-Goog-Visitor-Id", visitor)
+            })
+            .timeout(Duration::from_secs(60))
+            .body(AsyncBody::from(body))
+            .map_err(|error| AppError::Network(error.to_string()))?;
+        self.read_response_body(request, "YouTube Music get_queue")
+            .await
+    }
+
+    async fn fetch_media_info_page(&self, video_id: &str) -> Result<Vec<u8>> {
+        let endpoint = RadioEndpoint::song(video_id);
+        let body = serde_json::to_vec(&NextBody {
+            context: RequestContext {
+                client: ClientContext {
+                    client_name: WEB_CLIENT_NAME,
+                    client_version: WEB_CLIENT_VERSION,
+                    language: &self.session.language,
+                    region: &self.session.region,
+                    visitor_data: self.session.visitor_data.as_deref(),
+                },
+                request: RequestMetadata { use_ssl: true },
+                user: UserContext {
+                    locked_safety_mode: false,
+                    on_behalf_of_user: None,
+                },
+            },
+            endpoint: &endpoint,
+            continuation: None,
+        })
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_ROOT}/next?prettyPrint=false"))
+            .header("Accept", "application/json")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Cache-Control", "no-cache")
+            .header("Content-Type", "application/json")
+            .header("X-Goog-Api-Format-Version", "1")
+            .header("X-YouTube-Client-Name", WEB_CLIENT_ID)
+            .header("X-YouTube-Client-Version", WEB_CLIENT_VERSION)
+            .header("X-Origin", ORIGIN)
+            .header("Referer", format!("{ORIGIN}/"))
+            .when_some(self.session.visitor_data.as_deref(), |request, visitor| {
+                request.header("X-Goog-Visitor-Id", visitor)
+            })
+            .timeout(Duration::from_secs(60))
+            .body(AsyncBody::from(body))
+            .map_err(|error| AppError::Network(error.to_string()))?;
+        self.read_response_body(request, "YouTube watch next").await
+    }
+
+    async fn fetch_public_video_counts(&self, video_id: &str) -> Result<Vec<u8>> {
+        let mut url = Url::parse(RETURN_YOUTUBE_DISLIKE_API)
+            .map_err(|error| AppError::Protocol(error.to_string()))?;
+        url.query_pairs_mut().append_pair("videoId", video_id);
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(url.as_str())
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(30))
+            .body(AsyncBody::default())
+            .map_err(|error| AppError::Network(error.to_string()))?;
+        self.read_response_body(request, "public video counts")
+            .await
+    }
+
+    async fn read_response_body(
+        &self,
+        request: Request<AsyncBody>,
+        operation: &str,
+    ) -> Result<Vec<u8>> {
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .map_err(|error| AppError::Network(error.to_string()))?;
+        let status = response.status();
+        let mut response_body = Vec::new();
+        response
+            .body_mut()
+            .read_to_end(&mut response_body)
+            .await
+            .map_err(|error| AppError::Network(error.to_string()))?;
+        if !status.is_success() {
+            return Err(AppError::Network(format!(
+                "{operation} returned HTTP {status}"
+            )));
+        }
+        Ok(response_body)
+    }
+
     async fn fetch_continuation(&self, endpoint: &str, continuation: &str) -> Result<Vec<u8>> {
         let continuation = continuation.trim();
         if continuation.is_empty() {
@@ -2057,6 +2282,23 @@ struct NextBody<'a> {
     endpoint: &'a RadioEndpoint,
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GetQueueBody<'a> {
+    context: RequestContext<'a>,
+    video_ids: &'a [&'a str],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playlist_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReturnYoutubeDislikeResponse {
+    view_count: Option<u64>,
+    likes: Option<u64>,
+    dislikes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -2639,6 +2881,160 @@ fn album_playlist_id(root: &Value, header: Option<&Value>) -> Option<String> {
     })
 }
 
+fn browse_playback_endpoint(value: &Value) -> Option<BrowsePlaybackEndpoint> {
+    let string_field = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let video_id = string_field("videoId");
+    let playlist_id = string_field("playlistId");
+    if video_id.is_none() && playlist_id.is_none() {
+        return None;
+    }
+    Some(BrowsePlaybackEndpoint {
+        video_id,
+        playlist_id,
+        playlist_set_video_id: string_field("playlistSetVideoId"),
+        params: string_field("params"),
+        index: value
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| u32::try_from(index).ok()),
+    })
+}
+
+fn artist_shuffle_endpoint(root: &Value, header: Option<&Value>) -> Option<BrowsePlaybackEndpoint> {
+    header
+        .and_then(|header| {
+            value_at(
+                header,
+                &[
+                    "playButton",
+                    "buttonRenderer",
+                    "navigationEndpoint",
+                    "watchEndpoint",
+                ],
+            )
+        })
+        .and_then(browse_playback_endpoint)
+        .or_else(|| {
+            let shelf = find_value_named(root, "musicShelfRenderer")?;
+            let first_song = find_value_named(shelf, "musicResponsiveListItemRenderer")?;
+            value_at(first_song, &["navigationEndpoint", "watchPlaylistEndpoint"])
+                .and_then(browse_playback_endpoint)
+        })
+}
+
+fn artist_radio_endpoint(header: Option<&Value>) -> Option<BrowsePlaybackEndpoint> {
+    header
+        .and_then(|header| {
+            value_at(
+                header,
+                &[
+                    "startRadioButton",
+                    "buttonRenderer",
+                    "navigationEndpoint",
+                    "watchEndpoint",
+                ],
+            )
+        })
+        .and_then(browse_playback_endpoint)
+}
+
+fn playlist_menu_endpoint(
+    header: Option<&Value>,
+    icon_type: &str,
+) -> Option<BrowsePlaybackEndpoint> {
+    let mut items = Vec::new();
+    collect_values_named(header?, "menuNavigationItemRenderer", &mut items);
+    items.into_iter().find_map(|item| {
+        (value_at(item, &["icon", "iconType"]).and_then(Value::as_str) == Some(icon_type))
+            .then(|| {
+                value_at(item, &["navigationEndpoint", "watchPlaylistEndpoint"])
+                    .and_then(browse_playback_endpoint)
+            })
+            .flatten()
+    })
+}
+
+fn artist_section_link(title: String, browse: &Value) -> Option<BrowseItem> {
+    let title = title.trim();
+    let browse_id = browse.get("browseId")?.as_str()?.trim();
+    if title.is_empty() || browse_id.is_empty() {
+        return None;
+    }
+    Some(BrowseItem {
+        browse_id: browse_id.to_owned(),
+        kind: BrowseKind::Category,
+        title: title.to_owned(),
+        subtitle: format!("View all {title}"),
+        thumbnail_url: None,
+        params: browse
+            .get("params")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|params| !params.is_empty())
+            .map(str::to_owned),
+        editable: false,
+    })
+}
+
+fn artist_section_links(root: &Value) -> Vec<BrowseItem> {
+    let mut links = Vec::new();
+    let mut shelves = Vec::new();
+    collect_values_named(root, "musicShelfRenderer", &mut shelves);
+    for shelf in shelves {
+        let link = text_at(shelf, &["title"]).and_then(|title| {
+            let first_title_run = value_at(shelf, &["title", "runs"])
+                .and_then(Value::as_array)
+                .and_then(|runs| runs.first())?;
+            let browse = value_at(first_title_run, &["navigationEndpoint", "browseEndpoint"])?;
+            artist_section_link(title, browse)
+        });
+        if let Some(link) = link
+            && !links.iter().any(|existing: &BrowseItem| {
+                existing.browse_id == link.browse_id && existing.params == link.params
+            })
+        {
+            links.push(link);
+        }
+    }
+
+    let mut carousels = Vec::new();
+    collect_values_named(root, "musicCarouselShelfRenderer", &mut carousels);
+    for carousel in carousels {
+        let link = value_at(
+            carousel,
+            &["header", "musicCarouselShelfBasicHeaderRenderer"],
+        )
+        .and_then(|header| {
+            let title = text_at(header, &["title"])?;
+            let browse = value_at(
+                header,
+                &[
+                    "moreContentButton",
+                    "buttonRenderer",
+                    "navigationEndpoint",
+                    "browseEndpoint",
+                ],
+            )?;
+            artist_section_link(title, browse)
+        });
+        if let Some(link) = link
+            && !links.iter().any(|existing| {
+                existing.browse_id == link.browse_id && existing.params == link.params
+            })
+        {
+            links.push(link);
+        }
+    }
+    links
+}
+
 pub fn parse_browse_response(json: impl AsRef<[u8]>, requested: BrowseItem) -> Result<BrowsePage> {
     let root: Value = serde_json::from_slice(json.as_ref())
         .map_err(|error| AppError::Protocol(error.to_string()))?;
@@ -2671,6 +3067,33 @@ pub fn parse_browse_response(json: impl AsRef<[u8]>, requested: BrowseItem) -> R
     }
 
     let fallback_artists = header.map(extract_artist_credits).unwrap_or_default();
+    let mut creator_links = Vec::new();
+    if matches!(item.kind, BrowseKind::Album | BrowseKind::Playlist) {
+        for artist in &fallback_artists {
+            let Some(browse_id) = artist.id.as_ref().filter(|id| !id.trim().is_empty()) else {
+                continue;
+            };
+            if creator_links
+                .iter()
+                .any(|existing: &BrowseItem| existing.browse_id == *browse_id)
+            {
+                continue;
+            }
+            creator_links.push(BrowseItem {
+                browse_id: browse_id.clone(),
+                kind: BrowseKind::Artist,
+                title: artist.name.clone(),
+                subtitle: if item.kind == BrowseKind::Playlist {
+                    "Playlist author".into()
+                } else {
+                    "Album artist".into()
+                },
+                thumbnail_url: None,
+                params: None,
+                editable: false,
+            });
+        }
+    }
     let album_credit = (item.kind == BrowseKind::Album).then(|| AlbumCredit {
         browse_id: item.browse_id.clone(),
         title: item.title.clone(),
@@ -2767,6 +3190,47 @@ pub fn parse_browse_response(json: impl AsRef<[u8]>, requested: BrowseItem) -> R
         .and_then(|renderer| text_at(renderer, &["description"]))
         .or_else(|| header.and_then(|header| text_at(header, &["description"])))
         .filter(|description| !description.is_empty());
+    let subscriber_count = (item.kind == BrowseKind::Artist)
+        .then(|| {
+            let header = header?;
+            text_at(
+                header,
+                &[
+                    "subscriptionButton2",
+                    "subscribeButtonRenderer",
+                    "subscriberCountWithSubscribeText",
+                ],
+            )
+            .or_else(|| {
+                text_at(
+                    header,
+                    &[
+                        "subscriptionButton",
+                        "subscribeButtonRenderer",
+                        "longSubscriberCountText",
+                    ],
+                )
+            })
+            .or_else(|| {
+                text_at(
+                    header,
+                    &[
+                        "subscriptionButton",
+                        "subscribeButtonRenderer",
+                        "shortSubscriberCountText",
+                    ],
+                )
+            })
+            .filter(|text| !text.is_empty())
+        })
+        .flatten();
+    let monthly_listener_count = (item.kind == BrowseKind::Artist)
+        .then(|| {
+            header
+                .and_then(|header| text_at(header, &["monthlyListenerCount"]))
+                .filter(|text| !text.is_empty())
+        })
+        .flatten();
 
     if item.kind == BrowseKind::Playlist
         && find_value_named(&root, "musicEditablePlaylistDetailHeaderRenderer").is_some()
@@ -2777,14 +3241,35 @@ pub fn parse_browse_response(json: impl AsRef<[u8]>, requested: BrowseItem) -> R
     let playlist_id = (item.kind == BrowseKind::Album)
         .then(|| album_playlist_id(&root, header))
         .flatten();
+    let shuffle_endpoint = match item.kind {
+        BrowseKind::Artist => artist_shuffle_endpoint(&root, header),
+        BrowseKind::Playlist => playlist_menu_endpoint(header, "MUSIC_SHUFFLE"),
+        BrowseKind::Album | BrowseKind::Podcast | BrowseKind::Category => None,
+    };
+    let radio_endpoint = match item.kind {
+        BrowseKind::Artist => artist_radio_endpoint(header),
+        BrowseKind::Playlist => playlist_menu_endpoint(header, "MIX"),
+        BrowseKind::Album | BrowseKind::Podcast | BrowseKind::Category => None,
+    };
+    let section_links = if item.kind == BrowseKind::Artist {
+        artist_section_links(&root)
+    } else {
+        Vec::new()
+    };
 
     Ok(BrowsePage {
         item,
         playlist_id,
+        shuffle_endpoint,
+        radio_endpoint,
         description,
+        subscriber_count,
+        monthly_listener_count,
         songs,
         playlist_entries,
         related,
+        section_links,
+        creator_links,
         channel_subscription,
         continuation: find_continuation(&root).map(str::to_owned),
     })
@@ -2924,6 +3409,106 @@ fn parse_radio_response(
         },
         automix_endpoint,
     })
+}
+
+fn parse_media_info_response(json: impl AsRef<[u8]>, video_id: &str) -> Result<MediaInfo> {
+    let root: Value = serde_json::from_slice(json.as_ref())
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+    let primary = find_value_named(&root, "videoPrimaryInfoRenderer");
+    let secondary = find_value_named(&root, "videoSecondaryInfoRenderer");
+    let owner = secondary.and_then(|secondary| find_value_named(secondary, "videoOwnerRenderer"));
+    Ok(MediaInfo {
+        video_id: video_id.to_owned(),
+        title: primary.and_then(|primary| text_at(primary, &["title"])),
+        author: owner.and_then(|owner| text_at(owner, &["title"])),
+        author_id: owner
+            .and_then(|owner| {
+                value_at(owner, &["navigationEndpoint", "browseEndpoint", "browseId"])
+            })
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        description: secondary
+            .and_then(|secondary| value_at(secondary, &["attributedDescription", "content"]))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| secondary.and_then(|secondary| text_at(secondary, &["description"]))),
+        upload_date: primary.and_then(|primary| text_at(primary, &["dateText"])),
+        subscribers: owner
+            .and_then(|owner| text_at(owner, &["subscriberCountText"]))
+            .and_then(|subscribers| subscribers.split_whitespace().next().map(str::to_owned)),
+        view_count: None,
+        likes: None,
+        dislikes: None,
+    })
+}
+
+fn parse_song_library_feedback_token(
+    json: impl AsRef<[u8]>,
+    video_id: &str,
+    in_library: bool,
+) -> Result<String> {
+    let root: Value = serde_json::from_slice(json.as_ref())
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+    let mut renderers = Vec::new();
+    collect_values_named(&root, "playlistPanelVideoRenderer", &mut renderers);
+    let renderer = renderers
+        .into_iter()
+        .find(|renderer| {
+            renderer.get("videoId").and_then(Value::as_str) == Some(video_id)
+                || value_at(
+                    renderer,
+                    &["navigationEndpoint", "watchEndpoint", "videoId"],
+                )
+                .and_then(Value::as_str)
+                    == Some(video_id)
+        })
+        .ok_or_else(|| {
+            AppError::Protocol(
+                "YouTube Music next response omitted the requested library song".into(),
+            )
+        })?;
+
+    let mut toggles = Vec::new();
+    collect_values_named(renderer, "toggleMenuServiceItemRenderer", &mut toggles);
+    for toggle in toggles {
+        let icon = value_at(toggle, &["defaultIcon", "iconType"])
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let add_state = matches!(icon, "LIBRARY_ADD" | "BOOKMARK_BORDER");
+        let saved_state = matches!(icon, "LIBRARY_SAVED" | "BOOKMARK" | "LIBRARY_REMOVE");
+        if !add_state && !saved_state {
+            continue;
+        }
+        let endpoint = match (in_library, add_state) {
+            (true, true) | (false, false) => "defaultServiceEndpoint",
+            (true, false) | (false, true) => "toggledServiceEndpoint",
+        };
+        if let Some(token) = value_at(toggle, &[endpoint, "feedbackEndpoint", "feedbackToken"])
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            return Ok(token.to_owned());
+        }
+    }
+
+    Err(AppError::Protocol(if in_library {
+        "YouTube Music did not provide a fresh add-to-library token".into()
+    } else {
+        "YouTube Music did not provide a fresh remove-from-library token".into()
+    }))
+}
+
+fn parse_queue_song_response(json: impl AsRef<[u8]>, video_id: &str) -> Result<Song> {
+    let root: Value = serde_json::from_slice(json.as_ref())
+        .map_err(|error| AppError::Protocol(error.to_string()))?;
+    let mut renderers = Vec::new();
+    collect_values_named(&root, "playlistPanelVideoRenderer", &mut renderers);
+    renderers
+        .into_iter()
+        .filter_map(parse_playlist_panel_song)
+        .find(|song| song.video_id == video_id)
+        .ok_or_else(|| AppError::Protocol("YouTube Music queue omitted the requested song".into()))
 }
 
 fn parse_playlist_panel_song(renderer: &Value) -> Option<Song> {

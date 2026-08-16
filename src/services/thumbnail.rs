@@ -89,9 +89,12 @@ impl ThumbnailCache {
     pub async fn load(&self, url: &str) -> Result<ThumbnailImage> {
         let url =
             Url::parse(url).map_err(|_| AppError::Protocol("thumbnail URL is invalid".into()))?;
+        if url.scheme() == "file" {
+            return load_local_image(&url);
+        }
         if !matches!(url.scheme(), "http" | "https") {
             return Err(AppError::Protocol(
-                "thumbnail URL must use HTTP or HTTPS".into(),
+                "thumbnail URL must use HTTP, HTTPS, or a local file".into(),
             ));
         }
         let key = stable_hash(url.as_str().as_bytes());
@@ -157,6 +160,16 @@ impl ThumbnailCache {
             tracing::warn!(%error, "thumbnail cache write failed");
         }
         Ok(image)
+    }
+
+    pub fn clear(&self) -> io::Result<()> {
+        let _guard = self.lock_filesystem()?;
+        match fs::remove_dir_all(&self.inner.root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::create_dir_all(&self.inner.root)
     }
 
     fn read_cached(&self, key: u128) -> io::Result<Option<ThumbnailImage>> {
@@ -264,6 +277,45 @@ impl ThumbnailCache {
         }
         Ok(())
     }
+}
+
+fn load_local_image(url: &Url) -> Result<ThumbnailImage> {
+    let path = url
+        .to_file_path()
+        .map_err(|_| AppError::Protocol("local thumbnail path is invalid".into()))?;
+    let metadata = fs::metadata(&path).map_err(|error| {
+        AppError::Storage(format!(
+            "could not inspect local thumbnail '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::Protocol(
+            "local thumbnail must be an image file".into(),
+        ));
+    }
+    if metadata.len() > MAX_THUMBNAIL_BYTES {
+        return Err(AppError::Protocol(
+            "local thumbnail exceeded the 16 MiB limit".into(),
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        AppError::Storage(format!(
+            "could not read local thumbnail '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if bytes.is_empty() {
+        return Err(AppError::Protocol("local thumbnail was empty".into()));
+    }
+    let format = detect_image_format(None, &bytes)
+        .ok_or_else(|| AppError::Protocol("local thumbnail format is unsupported".into()))?;
+    if !validate_image(format, &bytes) {
+        return Err(AppError::Protocol(
+            "local thumbnail image data could not be decoded".into(),
+        ));
+    }
+    Ok(ThumbnailImage { format, bytes })
 }
 
 fn encode_cache_document(image: &ThumbnailImage) -> Vec<u8> {

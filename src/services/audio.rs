@@ -33,6 +33,16 @@ pub const DEFAULT_AUDIO_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const MIN_NORMALIZATION_GAIN_MB: i32 = -1_500;
 const MAX_NORMALIZATION_GAIN_MB: i32 = 300;
 const TIME_STRETCH_CHUNK_FRAMES: usize = 4_096;
+const SILENCE_THRESHOLD: f32 = 256.0 / 32_768.0;
+const SILENCE_COMPRESSION_START_MS: u64 = 150;
+const INSTANT_SILENCE_SKIP_START_MS: u64 = 2_000;
+const SILENCE_RETENTION_INTERVAL: u64 = 5;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SilenceSkipping {
+    enabled: bool,
+    instant: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct AudioNormalization {
@@ -121,6 +131,123 @@ where
 
     fn try_seek(&mut self, position: Duration) -> std::result::Result<(), SeekError> {
         self.inner.try_seek(position)
+    }
+}
+
+struct SilenceSkippingSource<S> {
+    inner: S,
+    settings: SilenceSkipping,
+    channels: usize,
+    sample_rate: u32,
+    output: VecDeque<f32>,
+    consecutive_silent_frames: u64,
+    skipped_frames: Arc<AtomicU64>,
+}
+
+impl<S> SilenceSkippingSource<S>
+where
+    S: Source<Item = f32>,
+{
+    fn new(inner: S, settings: SilenceSkipping, skipped_frames: Arc<AtomicU64>) -> Self {
+        Self {
+            channels: usize::from(inner.channels().get()),
+            sample_rate: inner.sample_rate().get(),
+            inner,
+            settings,
+            output: VecDeque::new(),
+            consecutive_silent_frames: 0,
+            skipped_frames,
+        }
+    }
+
+    fn duration_frames(&self, milliseconds: u64) -> u64 {
+        u64::from(self.sample_rate).saturating_mul(milliseconds) / 1_000
+    }
+
+    fn fill_output(&mut self) {
+        while self.output.is_empty() {
+            let mut frame = Vec::with_capacity(self.channels);
+            for _ in 0..self.channels {
+                let Some(sample) = self.inner.next() else {
+                    self.output.extend(frame);
+                    return;
+                };
+                frame.push(sample);
+            }
+
+            if !self.settings.enabled {
+                self.output.extend(frame);
+                return;
+            }
+
+            let silent = frame.iter().all(|sample| sample.abs() < SILENCE_THRESHOLD);
+            if !silent {
+                self.consecutive_silent_frames = 0;
+                self.output.extend(frame);
+                return;
+            }
+
+            self.consecutive_silent_frames = self.consecutive_silent_frames.saturating_add(1);
+            let compression_start = self.duration_frames(SILENCE_COMPRESSION_START_MS);
+            let instant_start = self.duration_frames(INSTANT_SILENCE_SKIP_START_MS);
+            let instant_skip =
+                self.settings.instant && self.consecutive_silent_frames > instant_start;
+            let compressed_skip = self.consecutive_silent_frames > compression_start
+                && !(self.consecutive_silent_frames - compression_start)
+                    .is_multiple_of(SILENCE_RETENTION_INTERVAL);
+            if instant_skip || compressed_skip {
+                self.skipped_frames.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+
+            self.output.extend(frame);
+            return;
+        }
+    }
+}
+
+impl<S> Iterator for SilenceSkippingSource<S>
+where
+    S: Source<Item = f32>,
+{
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.fill_output();
+        self.output.pop_front()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.output.len(), self.inner.size_hint().1)
+    }
+}
+
+impl<S> Source for SilenceSkippingSource<S>
+where
+    S: Source<Item = f32>,
+{
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, position: Duration) -> std::result::Result<(), SeekError> {
+        self.inner.try_seek(position)?;
+        self.output.clear();
+        self.consecutive_silent_frames = 0;
+        self.skipped_frames.store(0, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -313,6 +440,8 @@ struct TimeStretchSource<S> {
     total_duration: Option<Duration>,
     tempo_ratio: f64,
     position_ns: Arc<AtomicU64>,
+    skipped_frames: Arc<AtomicU64>,
+    media_sample_rate: u32,
     position_anchor_ns: u64,
     output_frames: u64,
     output_channel: usize,
@@ -324,7 +453,12 @@ impl<S> TimeStretchSource<S>
 where
     S: Source<Item = f32>,
 {
-    fn new(inner: S, parameters: PlaybackParameters, position_ns: Arc<AtomicU64>) -> Result<Self> {
+    fn new(
+        inner: S,
+        parameters: PlaybackParameters,
+        position_ns: Arc<AtomicU64>,
+        skipped_frames: Arc<AtomicU64>,
+    ) -> Result<Self> {
         let parameters = parameters.validate()?;
         let channels = usize::from(inner.channels().get());
         let raw_sample_rate = inner.sample_rate().get();
@@ -354,6 +488,8 @@ where
             total_duration,
             tempo_ratio: f64::from(parameters.tempo_ratio()),
             position_ns,
+            skipped_frames,
+            media_sample_rate: raw_sample_rate,
             position_anchor_ns: 0,
             output_frames: 0,
             output_channel: 0,
@@ -410,6 +546,7 @@ where
         self.inner_exhausted = false;
         self.flushed = false;
         self.position_anchor_ns = duration_ns(position);
+        self.skipped_frames.store(0, Ordering::Relaxed);
         self.position_ns
             .store(self.position_anchor_ns, Ordering::Relaxed);
     }
@@ -418,7 +555,13 @@ where
         let elapsed_ns = (self.output_frames as f64 * self.tempo_ratio * 1_000_000_000.0
             / f64::from(self.sample_rate.get()))
         .round() as u64;
-        let position_ns = self.position_anchor_ns.saturating_add(elapsed_ns);
+        let skipped_ns = (u128::from(self.skipped_frames.load(Ordering::Relaxed)) * 1_000_000_000
+            / u128::from(self.media_sample_rate))
+        .min(u128::from(u64::MAX)) as u64;
+        let position_ns = self
+            .position_anchor_ns
+            .saturating_add(elapsed_ns)
+            .saturating_add(skipped_ns);
         let position_ns = self.total_duration.map_or(position_ns, |duration| {
             position_ns.min(duration_ns(duration))
         });
@@ -448,7 +591,10 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.fill_output();
-        let sample = self.output.pop_front()?;
+        let Some(sample) = self.output.pop_front() else {
+            self.publish_position();
+            return None;
+        };
         self.output_channel += 1;
         if self.output_channel == self.channels {
             self.output_channel = 0;
@@ -490,9 +636,20 @@ where
     }
 }
 
+struct PreparedPlayback {
+    source: Box<dyn Source<Item = f32> + Send>,
+    source_for_reload: PlaybackSource,
+    source_failure: Arc<PlaybackReadFailure>,
+    duration: Option<Duration>,
+    normalization_gain_mb: Option<i32>,
+    playback_position_ns: Arc<AtomicU64>,
+}
+
 struct RodioAudioPlayer {
     _device: MixerDeviceSink,
     player: Player,
+    fading_player: Option<Player>,
+    crossfade_duration: Option<Duration>,
     client: Arc<dyn HttpClient>,
     disk_cache: Option<Arc<AudioCache>>,
     download_store: Option<Arc<DownloadedAudioStore>>,
@@ -502,11 +659,14 @@ struct RodioAudioPlayer {
     duration: Option<Duration>,
     state: PlaybackState,
     normalization: AudioNormalization,
+    silence_skipping: SilenceSkipping,
     normalization_gain_mb: Option<i32>,
     equalizer: EqualizerSettings,
     playback_parameters: PlaybackParameters,
     playback_position_ns: Arc<AtomicU64>,
     selected_output_device_id: String,
+    volume: f32,
+    volume_multiplier: f32,
 }
 
 impl RodioAudioPlayer {
@@ -533,6 +693,7 @@ impl RodioAudioPlayer {
             download_store,
             None,
             AudioNormalization::default(),
+            SilenceSkipping::default(),
             EqualizerSettings::default(),
             PlaybackParameters::default(),
         )
@@ -544,6 +705,7 @@ impl RodioAudioPlayer {
         download_store: Option<Arc<DownloadedAudioStore>>,
         requested_device_id: Option<&str>,
         normalization: AudioNormalization,
+        silence_skipping: SilenceSkipping,
         equalizer: EqualizerSettings,
         playback_parameters: PlaybackParameters,
     ) -> Result<Self> {
@@ -555,6 +717,8 @@ impl RodioAudioPlayer {
         Ok(Self {
             _device: device,
             player,
+            fading_player: None,
+            crossfade_duration: None,
             client,
             disk_cache,
             download_store,
@@ -564,12 +728,132 @@ impl RodioAudioPlayer {
             duration: None,
             state: PlaybackState::Idle,
             normalization,
+            silence_skipping,
             normalization_gain_mb: None,
             equalizer,
             playback_parameters: playback_parameters.validate()?,
             playback_position_ns: Arc::new(AtomicU64::new(0)),
             selected_output_device_id,
+            volume: 0.8,
+            volume_multiplier: 1.0,
         })
+    }
+
+    fn prepare_playback(&self, source: PlaybackSource) -> Result<PreparedPlayback> {
+        let source_for_reload = source.clone();
+        if source.access == PlaybackSourceAccess::CacheOnly {
+            let content_length = source.content_length.ok_or_else(|| {
+                AppError::Playback("cache-only playback requires a known content length".into())
+            })?;
+            let cache_key = source.disk_cache_key().ok_or_else(|| {
+                AppError::Playback("cache-only playback requires a stable cache key".into())
+            })?;
+            let downloaded = self.download_store.as_ref().is_some_and(|store| {
+                store
+                    .contains_complete_resource(&cache_key, content_length, RANGE_CHUNK_SIZE)
+                    .unwrap_or(false)
+            });
+            let cached = self.disk_cache.as_ref().is_some_and(|cache| {
+                cache
+                    .contains_complete_resource(&cache_key, content_length, RANGE_CHUNK_SIZE)
+                    .unwrap_or(false)
+            });
+            if !downloaded && !cached {
+                return Err(AppError::Playback(
+                    "offline audio is incomplete; a fresh playback source is required".into(),
+                ));
+            }
+        }
+
+        let content_length = source.content_length;
+        let normalization_gain_mb =
+            normalization_gain_mb(self.normalization, source.loudness_lufs_mb);
+        let mime_type = source
+            .mime_type
+            .split_once(';')
+            .map_or(source.mime_type.as_str(), |(mime_type, _)| mime_type)
+            .to_owned();
+        let source_failure = Arc::new(PlaybackReadFailure::default());
+        let range_source = HttpRangeMediaSource::new(self.client.clone(), source)
+            .with_disk_cache(self.disk_cache.clone())
+            .with_download_store(self.download_store.clone())
+            .with_failure_reporter(source_failure.clone());
+        let mut decoder = Decoder::builder()
+            .with_data(range_source)
+            .with_hint("m4a")
+            .with_mime_type(&mime_type);
+        if let Some(content_length) = content_length {
+            decoder = decoder.with_byte_len(content_length).with_seekable(true);
+        }
+        let decoder = decoder
+            .build()
+            .map_err(|error| AppError::Playback(format!("audio decoder failed: {error}")))?;
+
+        let duration = decoder.total_duration();
+        let playback_position_ns = Arc::new(AtomicU64::new(0));
+        let skipped_frames = Arc::new(AtomicU64::new(0));
+        let processed = TimeStretchSource::new(
+            EqualizerSource::new(
+                ClampedGain::new(
+                    SilenceSkippingSource::new(
+                        decoder,
+                        self.silence_skipping,
+                        skipped_frames.clone(),
+                    ),
+                    normalization_gain_mb,
+                ),
+                self.equalizer.clone(),
+            ),
+            self.playback_parameters,
+            playback_position_ns.clone(),
+            skipped_frames,
+        )?;
+        Ok(PreparedPlayback {
+            source: Box::new(processed),
+            source_for_reload,
+            source_failure,
+            duration,
+            normalization_gain_mb,
+            playback_position_ns,
+        })
+    }
+
+    fn install_prepared(&mut self, prepared: PreparedPlayback) {
+        self.player.append(prepared.source);
+        self.player.pause();
+        self.loaded = true;
+        self.loaded_source = Some(prepared.source_for_reload);
+        self.source_failure = Some(prepared.source_failure);
+        self.duration = prepared.duration;
+        self.normalization_gain_mb = prepared.normalization_gain_mb;
+        self.playback_position_ns = prepared.playback_position_ns;
+        self.state = PlaybackState::Paused;
+    }
+
+    fn apply_output_volume(&self) {
+        let output_volume = (self.volume * self.volume_multiplier).clamp(0.0, 1.0);
+        let Some(fading_player) = &self.fading_player else {
+            self.player.set_volume(output_volume);
+            return;
+        };
+        let Some(duration) = self
+            .crossfade_duration
+            .filter(|duration| !duration.is_zero())
+        else {
+            fading_player.stop();
+            self.player.set_volume(output_volume);
+            return;
+        };
+        let position = Duration::from_nanos(self.playback_position_ns.load(Ordering::Relaxed));
+        let progress = (position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+        let remaining = 1.0 - progress;
+        let fade_out = remaining * remaining;
+        let fade_in = 1.0 - fade_out;
+        self.player.set_volume(output_volume * fade_in);
+        fading_player.set_volume(output_volume * fade_out);
+        if progress >= 1.0 {
+            fading_player.stop();
+        }
     }
 
     fn rebuild_processing(
@@ -599,7 +883,7 @@ impl RodioAudioPlayer {
 
         let old_player =
             std::mem::replace(&mut self.player, Player::connect_new(self._device.mixer()));
-        self.player.set_volume(before.volume);
+        self.apply_output_volume();
         let old_loaded = self.loaded;
         let old_loaded_source = self.loaded_source.clone();
         let old_source_failure = self.source_failure.clone();
@@ -821,7 +1105,10 @@ fn open_output_device(requested_device_id: Option<&str>) -> Result<(MixerDeviceS
 
 impl AudioPlayer for RodioAudioPlayer {
     fn load(&mut self, source: PlaybackSource) -> Result<()> {
-        let source_for_reload = source.clone();
+        if let Some(fading_player) = self.fading_player.take() {
+            fading_player.stop();
+        }
+        self.crossfade_duration = None;
         self.player.clear();
         self.loaded = false;
         self.loaded_source = None;
@@ -829,73 +1116,26 @@ impl AudioPlayer for RodioAudioPlayer {
         self.duration = None;
         self.normalization_gain_mb = None;
         self.state = PlaybackState::Loading;
+        let prepared = self.prepare_playback(source)?;
+        self.install_prepared(prepared);
+        self.apply_output_volume();
+        Ok(())
+    }
 
-        if source.access == PlaybackSourceAccess::CacheOnly {
-            let content_length = source.content_length.ok_or_else(|| {
-                AppError::Playback("cache-only playback requires a known content length".into())
-            })?;
-            let cache_key = source.disk_cache_key().ok_or_else(|| {
-                AppError::Playback("cache-only playback requires a stable cache key".into())
-            })?;
-            let downloaded = self.download_store.as_ref().is_some_and(|store| {
-                store
-                    .contains_complete_resource(&cache_key, content_length, RANGE_CHUNK_SIZE)
-                    .unwrap_or(false)
-            });
-            let cached = self.disk_cache.as_ref().is_some_and(|cache| {
-                cache
-                    .contains_complete_resource(&cache_key, content_length, RANGE_CHUNK_SIZE)
-                    .unwrap_or(false)
-            });
-            if !downloaded && !cached {
-                return Err(AppError::Playback(
-                    "offline audio is incomplete; a fresh playback source is required".into(),
-                ));
-            }
+    fn load_with_crossfade(&mut self, source: PlaybackSource, duration: Duration) -> Result<()> {
+        if !self.loaded || self.player.empty() || duration.is_zero() {
+            return self.load(source);
         }
-
-        let content_length = source.content_length;
-        let normalization_gain_mb =
-            normalization_gain_mb(self.normalization, source.loudness_lufs_mb);
-        let mime_type = source
-            .mime_type
-            .split_once(';')
-            .map_or(source.mime_type.as_str(), |(mime_type, _)| mime_type)
-            .to_owned();
-        let source_failure = Arc::new(PlaybackReadFailure::default());
-        let range_source = HttpRangeMediaSource::new(self.client.clone(), source)
-            .with_disk_cache(self.disk_cache.clone())
-            .with_download_store(self.download_store.clone())
-            .with_failure_reporter(source_failure.clone());
-        let mut decoder = Decoder::builder()
-            .with_data(range_source)
-            .with_hint("m4a")
-            .with_mime_type(&mime_type);
-        if let Some(content_length) = content_length {
-            decoder = decoder.with_byte_len(content_length).with_seekable(true);
+        let prepared = self.prepare_playback(source)?;
+        if let Some(fading_player) = self.fading_player.take() {
+            fading_player.stop();
         }
-        let decoder = decoder
-            .build()
-            .map_err(|error| AppError::Playback(format!("audio decoder failed: {error}")))?;
-
-        self.duration = decoder.total_duration();
-        let playback_position_ns = Arc::new(AtomicU64::new(0));
-        let processed = TimeStretchSource::new(
-            EqualizerSource::new(
-                ClampedGain::new(decoder, normalization_gain_mb),
-                self.equalizer.clone(),
-            ),
-            self.playback_parameters,
-            playback_position_ns.clone(),
-        )?;
-        self.player.append(processed);
-        self.player.pause();
-        self.loaded = true;
-        self.loaded_source = Some(source_for_reload);
-        self.source_failure = Some(source_failure);
-        self.normalization_gain_mb = normalization_gain_mb;
-        self.playback_position_ns = playback_position_ns;
-        self.state = PlaybackState::Paused;
+        let new_player = Player::connect_new(self._device.mixer());
+        let fading_player = std::mem::replace(&mut self.player, new_player);
+        self.fading_player = Some(fading_player);
+        self.crossfade_duration = Some(duration);
+        self.install_prepared(prepared);
+        self.apply_output_volume();
         Ok(())
     }
 
@@ -904,6 +1144,9 @@ impl AudioPlayer for RodioAudioPlayer {
             return Err(AppError::Playback("no audio source is loaded".into()));
         }
         self.player.play();
+        if let Some(fading_player) = &self.fading_player {
+            fading_player.play();
+        }
         self.state = PlaybackState::Playing;
         Ok(())
     }
@@ -913,12 +1156,19 @@ impl AudioPlayer for RodioAudioPlayer {
             return Err(AppError::Playback("no audio source is loaded".into()));
         }
         self.player.pause();
+        if let Some(fading_player) = &self.fading_player {
+            fading_player.pause();
+        }
         self.state = PlaybackState::Paused;
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
         self.player.stop();
+        if let Some(fading_player) = self.fading_player.take() {
+            fading_player.stop();
+        }
+        self.crossfade_duration = None;
         self.loaded = false;
         self.loaded_source = None;
         self.source_failure = None;
@@ -933,13 +1183,26 @@ impl AudioPlayer for RodioAudioPlayer {
         if !self.loaded {
             return Err(AppError::Playback("no audio source is loaded".into()));
         }
-        self.player
+        if let Some(fading_player) = self.fading_player.take() {
+            fading_player.stop();
+        }
+        self.crossfade_duration = None;
+        let result = self
+            .player
             .try_seek(position)
-            .map_err(|error| AppError::Playback(format!("audio seek failed: {error}")))
+            .map_err(|error| AppError::Playback(format!("audio seek failed: {error}")));
+        self.apply_output_volume();
+        result
     }
 
     fn set_volume(&mut self, volume: f32) {
-        self.player.set_volume(volume.clamp(0.0, 1.0));
+        self.volume = volume.clamp(0.0, 1.0);
+        self.apply_output_volume();
+    }
+
+    fn set_volume_multiplier(&mut self, multiplier: f32) {
+        self.volume_multiplier = multiplier.clamp(0.0, 1.0);
+        self.apply_output_volume();
     }
 
     fn set_playback_parameters(&mut self, parameters: PlaybackParameters) -> Result<()> {
@@ -951,6 +1214,7 @@ impl AudioPlayer for RodioAudioPlayer {
     }
 
     fn snapshot(&self) -> PlaybackSnapshot {
+        self.apply_output_volume();
         let source_error = self
             .source_failure
             .as_ref()
@@ -967,7 +1231,7 @@ impl AudioPlayer for RodioAudioPlayer {
             state,
             position,
             duration: self.duration,
-            volume: self.player.volume(),
+            volume: self.volume,
             normalization_gain_mb: self.normalization_gain_mb,
             equalizer_active: self.loaded && self.equalizer.is_effective(),
             playback_parameters: self.playback_parameters,
@@ -1001,10 +1265,12 @@ impl AudioPlayer for RodioAudioPlayer {
                 self.download_store.clone(),
                 Some(device_id),
                 self.normalization,
+                self.silence_skipping,
                 self.equalizer.clone(),
                 self.playback_parameters,
             )?;
             replacement.set_volume(before.volume);
+            replacement.set_volume_multiplier(self.volume_multiplier);
             if let Some(source) = source {
                 replacement.load(source)?;
                 if !position.is_zero() {
@@ -1044,11 +1310,16 @@ impl AudioPlayer for RodioAudioPlayer {
 
 enum AudioCommand {
     Load(PlaybackSource),
+    LoadWithCrossfade {
+        source: PlaybackSource,
+        duration: Duration,
+    },
     Play,
     Pause,
     Stop,
     Seek(Duration),
     SetVolume(f32),
+    SetVolumeMultiplier(f32),
     SetPlaybackParameters {
         parameters: PlaybackParameters,
         response: mpsc::SyncSender<Result<()>>,
@@ -1152,6 +1423,10 @@ impl DesktopAudioPlayer {
             level: settings.loudness_level,
         };
         let equalizer = settings.equalizer.clone();
+        let silence_skipping = SilenceSkipping {
+            enabled: settings.skip_silence,
+            instant: settings.skip_silence_instant,
+        };
         let playback_parameters = settings.playback_parameters;
         Ok(Self::with_backend_factory(move || {
             Ok(Box::new(RodioAudioPlayer::with_dependencies(
@@ -1160,6 +1435,7 @@ impl DesktopAudioPlayer {
                 Some(download_store.clone()),
                 None,
                 normalization,
+                silence_skipping,
                 equalizer.clone(),
                 playback_parameters,
             )?) as Box<dyn AudioPlayer>)
@@ -1267,6 +1543,18 @@ impl AudioPlayer for DesktopAudioPlayer {
         self.send(AudioCommand::Load(source))
     }
 
+    fn load_with_crossfade(&mut self, source: PlaybackSource, duration: Duration) -> Result<()> {
+        self.update_snapshot(|snapshot| {
+            snapshot.state = PlaybackState::Loading;
+            snapshot.position = Duration::ZERO;
+            snapshot.duration = None;
+            snapshot.normalization_gain_mb = None;
+            snapshot.equalizer_active = false;
+            snapshot.error = None;
+        });
+        self.send(AudioCommand::LoadWithCrossfade { source, duration })
+    }
+
     fn play(&mut self) -> Result<()> {
         self.send(AudioCommand::Play)
     }
@@ -1290,6 +1578,12 @@ impl AudioPlayer for DesktopAudioPlayer {
         let volume = volume.clamp(0.0, 1.0);
         self.update_snapshot(|snapshot| snapshot.volume = volume);
         let _ = self.send(AudioCommand::SetVolume(volume));
+    }
+
+    fn set_volume_multiplier(&mut self, multiplier: f32) {
+        let _ = self.send(AudioCommand::SetVolumeMultiplier(
+            multiplier.clamp(0.0, 1.0),
+        ));
     }
 
     fn set_playback_parameters(&mut self, parameters: PlaybackParameters) -> Result<()> {
@@ -1329,6 +1623,7 @@ fn run_audio_worker(
 ) {
     let mut backend: Option<Box<dyn AudioPlayer>> = None;
     let mut desired_volume = 0.8;
+    let mut desired_volume_multiplier = 1.0;
     let mut desired_equalizer: Option<EqualizerSettings> = None;
     let mut last_error: Option<String> = None;
 
@@ -1340,6 +1635,7 @@ fn run_audio_worker(
                 let result = ensure_audio_backend(
                     &mut backend,
                     desired_volume,
+                    desired_volume_multiplier,
                     desired_equalizer.as_ref(),
                     &mut backend_factory,
                 )
@@ -1365,6 +1661,7 @@ fn run_audio_worker(
                 let result = ensure_audio_backend(
                     &mut backend,
                     desired_volume,
+                    desired_volume_multiplier,
                     desired_equalizer.as_ref(),
                     &mut backend_factory,
                 )
@@ -1401,6 +1698,7 @@ fn run_audio_worker(
                 let result = ensure_audio_backend(
                     &mut backend,
                     desired_volume,
+                    desired_volume_multiplier,
                     desired_equalizer.as_ref(),
                     &mut backend_factory,
                 )
@@ -1453,11 +1751,15 @@ fn run_audio_worker(
                 {
                     continue;
                 }
-                let can_recover = !matches!(&command, AudioCommand::SetVolume(_));
+                let can_recover = !matches!(
+                    &command,
+                    AudioCommand::SetVolume(_) | AudioCommand::SetVolumeMultiplier(_)
+                );
                 let result = run_audio_command(
                     command,
                     &mut backend,
                     &mut desired_volume,
+                    &mut desired_volume_multiplier,
                     desired_equalizer.as_ref(),
                     &mut backend_factory,
                 );
@@ -1488,6 +1790,7 @@ fn run_audio_command(
     command: AudioCommand,
     backend: &mut Option<Box<dyn AudioPlayer>>,
     desired_volume: &mut f32,
+    desired_volume_multiplier: &mut f32,
     desired_equalizer: Option<&EqualizerSettings>,
     backend_factory: &mut AudioBackendFactory,
 ) -> Result<()> {
@@ -1498,17 +1801,33 @@ fn run_audio_command(
         }
         return Ok(());
     }
+    if let AudioCommand::SetVolumeMultiplier(multiplier) = command {
+        *desired_volume_multiplier = multiplier;
+        if let Some(backend) = backend.as_mut() {
+            backend.set_volume_multiplier(multiplier);
+        }
+        return Ok(());
+    }
 
-    let backend =
-        ensure_audio_backend(backend, *desired_volume, desired_equalizer, backend_factory)?;
+    let backend = ensure_audio_backend(
+        backend,
+        *desired_volume,
+        *desired_volume_multiplier,
+        desired_equalizer,
+        backend_factory,
+    )?;
 
     match command {
         AudioCommand::Load(source) => backend.load(source),
+        AudioCommand::LoadWithCrossfade { source, duration } => {
+            backend.load_with_crossfade(source, duration)
+        }
         AudioCommand::Play => backend.play(),
         AudioCommand::Pause => backend.pause(),
         AudioCommand::Stop => backend.stop(),
         AudioCommand::Seek(position) => backend.seek(position),
         AudioCommand::SetVolume(_)
+        | AudioCommand::SetVolumeMultiplier(_)
         | AudioCommand::SetPlaybackParameters { .. }
         | AudioCommand::SetEqualizer { .. }
         | AudioCommand::RefreshOutputDevices
@@ -1520,6 +1839,7 @@ fn run_audio_command(
 fn ensure_audio_backend<'a>(
     backend: &'a mut Option<Box<dyn AudioPlayer>>,
     desired_volume: f32,
+    desired_volume_multiplier: f32,
     desired_equalizer: Option<&EqualizerSettings>,
     backend_factory: &mut AudioBackendFactory,
 ) -> Result<&'a mut Box<dyn AudioPlayer>> {
@@ -1534,6 +1854,7 @@ fn ensure_audio_backend<'a>(
         .as_mut()
         .expect("audio backend was initialized immediately above");
     backend.set_volume(desired_volume);
+    backend.set_volume_multiplier(desired_volume_multiplier);
     Ok(backend)
 }
 
@@ -1854,6 +2175,7 @@ mod tests {
                 transpose_semitones: 0,
             },
             position,
+            Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
         let output_rate = source.sample_rate().get();
@@ -1875,6 +2197,7 @@ mod tests {
                 tempo_milli: 1_000,
                 transpose_semitones: 12,
             },
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
@@ -1899,6 +2222,7 @@ mod tests {
                 transpose_semitones: 0,
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
         let varispeed_rate = varispeed.sample_rate().get();
@@ -1921,6 +2245,7 @@ mod tests {
         let mut source = TimeStretchSource::new(
             sine_source(SAMPLE_RATE, 2, 2, 440.0),
             parameters,
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
@@ -1946,6 +2271,7 @@ mod tests {
                 transpose_semitones: 12,
             },
             position.clone(),
+            Arc::new(AtomicU64::new(0)),
         )
         .unwrap();
         assert_eq!(source.sample_rate().get(), SAMPLE_RATE * 2);

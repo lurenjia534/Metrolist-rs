@@ -45,13 +45,28 @@ pub struct ChannelSubscription {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowsePlaybackEndpoint {
+    pub video_id: Option<String>,
+    pub playlist_id: Option<String>,
+    pub playlist_set_video_id: Option<String>,
+    pub params: Option<String>,
+    pub index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowsePage {
     pub item: BrowseItem,
     pub playlist_id: Option<String>,
+    pub shuffle_endpoint: Option<BrowsePlaybackEndpoint>,
+    pub radio_endpoint: Option<BrowsePlaybackEndpoint>,
     pub description: Option<String>,
+    pub subscriber_count: Option<String>,
+    pub monthly_listener_count: Option<String>,
     pub songs: Vec<Song>,
     pub playlist_entries: Vec<PlaylistEntry>,
     pub related: Vec<BrowseItem>,
+    pub section_links: Vec<BrowseItem>,
+    pub creator_links: Vec<BrowseItem>,
     pub channel_subscription: Option<ChannelSubscription>,
     pub continuation: Option<String>,
 }

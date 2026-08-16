@@ -227,6 +227,16 @@ impl AudioCache {
         }
     }
 
+    pub fn clear(&self) -> io::Result<()> {
+        let _guard = self.lock_filesystem()?;
+        match fs::remove_dir_all(&self.root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::create_dir_all(&self.root)
+    }
+
     fn lock_filesystem(&self) -> io::Result<MutexGuard<'_, ()>> {
         self.filesystem_lock
             .lock()
