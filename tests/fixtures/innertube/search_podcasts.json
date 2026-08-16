@@ -1,0 +1,88 @@
+{
+  "contents": [
+    {
+      "musicResponsiveListItemRenderer": {
+        "navigationEndpoint": {
+          "browseEndpoint": {
+            "browseId": "MPSPfixture-podcast",
+            "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+                "pageType": "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE"
+              }
+            }
+          }
+        },
+        "flexColumns": [
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": { "runs": [{ "text": "Fixture Podcast" }] }
+            }
+          },
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": { "runs": [{ "text": "Fixture Host · 42 episodes" }] }
+            }
+          }
+        ],
+        "thumbnail": {
+          "musicThumbnailRenderer": {
+            "thumbnail": {
+              "thumbnails": [
+                { "url": "https://i.ytimg.com/fixture-podcast.jpg", "width": 544, "height": 544 }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "musicResponsiveListItemRenderer": {
+        "videoId": "fixture-episode-one",
+        "flexColumns": [
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": { "runs": [{ "text": "A Fixture Episode" }] }
+            }
+          },
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+                "runs": [
+                  { "text": "Jan 2026" },
+                  { "text": " · " },
+                  {
+                    "text": "Fixture Podcast",
+                    "navigationEndpoint": {
+                      "browseEndpoint": {
+                        "browseId": "MPSPfixture-podcast",
+                        "browseEndpointContextSupportedConfigs": {
+                          "browseEndpointContextMusicConfig": {
+                            "pageType": "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  { "text": " · " },
+                  { "text": "1:02:03" }
+                ]
+              }
+            }
+          }
+        ],
+        "thumbnail": {
+          "musicThumbnailRenderer": {
+            "thumbnail": {
+              "thumbnails": [
+                { "url": "https://i.ytimg.com/fixture-episode.jpg", "width": 544, "height": 544 }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "continuations": [
+    { "nextContinuationData": { "continuation": "podcast-search-continuation" } }
+  ]
+}

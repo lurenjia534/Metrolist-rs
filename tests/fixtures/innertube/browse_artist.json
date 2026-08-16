@@ -1,0 +1,42 @@
+{
+  "header": {
+    "musicImmersiveHeaderRenderer": {
+      "title": { "runs": [{ "text": "Fixture Artist" }] },
+      "description": { "runs": [{ "text": "An artist fixture used without the network." }] },
+      "subscriptionButton": {
+        "subscribeButtonRenderer": {
+          "subscribed": true,
+          "channelId": "UC-fixture-channel"
+        }
+      },
+      "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://example.invalid/artist.jpg", "width": 600, "height": 600 }] } } }
+    }
+  },
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicShelfRenderer": {
+            "contents": [{ "musicResponsiveListItemRenderer": {
+              "playlistItemData": { "videoId": "artist-song-one" },
+              "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Artist Top Song" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Fixture Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-artist-one" } } }, { "text": " • " }, { "text": "2:58" }] } } }
+              ],
+              "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://example.invalid/song.jpg", "width": 226, "height": 226 }] } } }
+            } }]
+          }
+        },
+        {
+          "musicCarouselShelfRenderer": {
+            "contents": [{ "musicTwoRowItemRenderer": {
+              "navigationEndpoint": { "browseEndpoint": { "browseId": "MPRE-artist-album", "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ALBUM" } } } },
+              "title": { "runs": [{ "text": "Artist Album" }] },
+              "subtitle": { "runs": [{ "text": "Album • 2026" }] }
+            } }]
+          }
+        }
+      ]
+    }
+  }
+}

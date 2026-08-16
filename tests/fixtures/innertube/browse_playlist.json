@@ -1,0 +1,42 @@
+{
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicEditablePlaylistDetailHeaderRenderer": {
+            "header": {
+              "musicResponsiveHeaderRenderer": {
+                "title": { "runs": [{ "text": "Fixture Playlist" }] },
+                "straplineTextOne": { "runs": [{ "text": "Fixture Curator", "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-curator" } } }] },
+                "secondSubtitle": { "runs": [{ "text": "2 songs" }] },
+                "description": { "runs": [{ "text": "A local representation of an online playlist." }] }
+              }
+            }
+          }
+        },
+        {
+          "musicPlaylistShelfRenderer": {
+            "contents": [
+              { "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": "playlist-song-one", "playlistSetVideoId": "set-video-one" },
+                "flexColumns": [
+                  { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Playlist Song One" }] } } },
+                  { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "First Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-first" } } }] } } }
+                ],
+                "fixedColumns": [{ "musicResponsiveListItemFixedColumnRenderer": { "text": { "runs": [{ "text": "3:00" }] } } }]
+              } },
+              { "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": "playlist-song-two", "playlistSetVideoId": "set-video-two" },
+                "flexColumns": [
+                  { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Playlist Song Two" }] } } },
+                  { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Second Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-second" } } }] } } }
+                ],
+                "fixedColumns": [{ "musicResponsiveListItemFixedColumnRenderer": { "text": { "runs": [{ "text": "4:00" }] } } }]
+              } }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

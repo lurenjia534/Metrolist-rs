@@ -1,0 +1,156 @@
+{
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "New releases" }] },
+                          "moreContentButton": {
+                            "buttonRenderer": {
+                              "navigationEndpoint": {
+                                "browseEndpoint": {
+                                  "browseId": "FEmusic_new_releases_albums"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Fresh Album" }] },
+                            "subtitle": { "runs": [{ "text": "Fresh Artist • 2026" }] },
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "MPRE-fresh-album",
+                                "params": "album-params",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                  }
+                                }
+                              }
+                            },
+                            "thumbnailRenderer": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    { "url": "https://example.invalid/fresh-album.jpg", "width": 300, "height": 300 }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Duplicate Fresh Album" }] },
+                            "navigationEndpoint": {
+                              "browseEndpoint": { "browseId": "MPRE-fresh-album" }
+                            }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Not an album" }] },
+                            "navigationEndpoint": {
+                              "browseEndpoint": { "browseId": "UC-not-an-album" }
+                            }
+                          }
+                        },
+                        { "unknownRenderer": { "ignored": true } }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Moods & genres" }] },
+                          "moreContentButton": {
+                            "buttonRenderer": {
+                              "navigationEndpoint": {
+                                "browseEndpoint": {
+                                  "browseId": "FEmusic_moods_and_genres"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicNavigationButtonRenderer": {
+                            "buttonText": { "runs": [{ "text": "Focus" }] },
+                            "solid": { "leftStripeColor": 4281545523 },
+                            "clickCommand": {
+                              "browseEndpoint": {
+                                "browseId": "FEmusic_moods_and_genres_category",
+                                "params": "focus-params"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicNavigationButtonRenderer": {
+                            "buttonText": { "runs": [{ "text": "Workout" }] },
+                            "solid": { "leftStripeColor": 4294901760 },
+                            "clickCommand": {
+                              "browseEndpoint": {
+                                "browseId": "FEmusic_moods_and_genres_category",
+                                "params": "workout-params"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicNavigationButtonRenderer": {
+                            "buttonText": { "runs": [] },
+                            "clickCommand": { "browseEndpoint": {} }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "moreContentButton": {
+                            "buttonRenderer": {
+                              "navigationEndpoint": {
+                                "browseEndpoint": { "browseId": "FEmusic_unknown_shelf" }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicNavigationButtonRenderer": {
+                            "buttonText": { "runs": [{ "text": "Must be ignored" }] },
+                            "clickCommand": {
+                              "browseEndpoint": { "browseId": "FEmusic_ignored" }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

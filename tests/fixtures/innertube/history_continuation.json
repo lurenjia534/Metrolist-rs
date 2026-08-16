@@ -1,0 +1,85 @@
+{
+  "continuationContents": {
+    "sectionListContinuation": {
+      "contents": [
+        {
+          "musicShelfRenderer": {
+            "title": { "runs": [{ "text": "Today" }] },
+            "contents": [
+              {
+                "musicResponsiveListItemRenderer": {
+                  "playlistItemData": { "videoId": "history-song-one" },
+                  "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Duplicate Continuation Row" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "History Artist" }] } } }
+                  ],
+                  "menu": {
+                    "menuRenderer": {
+                      "items": [
+                        {
+                          "menuServiceItemRenderer": {
+                            "icon": { "iconType": "REMOVE_FROM_HISTORY" },
+                            "serviceEndpoint": { "feedbackEndpoint": { "feedbackToken": "history-token-two" } }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "musicResponsiveListItemRenderer": {
+                  "playlistItemData": { "videoId": "history-song-four" },
+                  "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "History Song Four" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Fourth Artist" }] } } }
+                  ],
+                  "menu": {
+                    "menuRenderer": {
+                      "items": [
+                        {
+                          "menuServiceItemRenderer": {
+                            "icon": { "iconType": "REMOVE_FROM_HISTORY" },
+                            "serviceEndpoint": { "feedbackEndpoint": { "feedbackToken": "history-token-four" } }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "musicShelfRenderer": {
+            "title": { "runs": [{ "text": "Older" }] },
+            "contents": [
+              {
+                "musicResponsiveListItemRenderer": {
+                  "playlistItemData": { "videoId": "history-song-five" },
+                  "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "History Song Five" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Fifth Artist" }] } } }
+                  ],
+                  "menu": {
+                    "menuRenderer": {
+                      "items": [
+                        {
+                          "menuServiceItemRenderer": {
+                            "icon": { "iconType": "REMOVE_FROM_HISTORY" },
+                            "serviceEndpoint": { "feedbackEndpoint": { "feedbackToken": "history-token-five" } }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

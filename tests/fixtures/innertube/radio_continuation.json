@@ -1,0 +1,52 @@
+{
+  "continuationContents": {
+    "playlistPanelContinuation": {
+      "contents": [
+        {
+          "playlistPanelVideoRenderer": {
+            "videoId": "recommended-one",
+            "title": { "runs": [{ "text": "Recommended one again" }] },
+            "longBylineText": { "runs": [{ "text": "Radio Artist" }] },
+            "lengthText": { "runs": [{ "text": "4:02" }] }
+          }
+        },
+        {
+          "playlistPanelVideoRenderer": {
+            "videoId": "recommended-two",
+            "title": { "runs": [{ "text": "Recommended two" }] },
+            "longBylineText": {
+              "runs": [
+                {
+                  "text": "Second Artist",
+                  "navigationEndpoint": {
+                    "browseEndpoint": {
+                      "browseId": "UC-second",
+                      "browseEndpointContextSupportedConfigs": {
+                        "browseEndpointContextMusicConfig": {
+                          "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "lengthText": { "runs": [{ "text": "2:59" }] },
+            "thumbnail": {
+              "thumbnails": [
+                { "url": "https://example.invalid/recommended-two.jpg", "width": 320, "height": 320 }
+              ]
+            }
+          }
+        }
+      ],
+      "continuations": [
+        {
+          "nextRadioContinuationData": {
+            "continuation": "radio-token-two"
+          }
+        }
+      ]
+    }
+  }
+}

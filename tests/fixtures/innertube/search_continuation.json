@@ -1,0 +1,51 @@
+{
+  "continuationContents": {
+    "musicShelfContinuation": {
+      "contents": [
+        {
+          "musicResponsiveListItemRenderer": {
+            "videoId": "continued-song-one",
+            "flexColumns": [
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": { "runs": [{ "text": "Continued Song" }] }
+                }
+              },
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": {
+                    "runs": [
+                      {
+                        "text": "Continued Artist",
+                        "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-continued" } }
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "fixedColumns": [
+              {
+                "musicResponsiveListItemFixedColumnRenderer": {
+                  "text": { "runs": [{ "text": "3:21" }] }
+                }
+              }
+            ],
+            "thumbnail": {
+              "musicThumbnailRenderer": {
+                "thumbnail": {
+                  "thumbnails": [
+                    { "url": "https://example.invalid/continued.jpg", "width": 226, "height": 226 }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ],
+      "continuations": [
+        { "nextContinuationData": { "continuation": "search-continuation-two" } }
+      ]
+    }
+  }
+}

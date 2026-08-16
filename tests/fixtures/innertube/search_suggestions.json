@@ -1,0 +1,153 @@
+{
+  "contents": [
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": {
+                "runs": [
+                  { "text": "daft " },
+                  { "text": "punk" }
+                ]
+              },
+              "navigationEndpoint": {
+                "searchEndpoint": { "query": "daft punk" }
+              }
+            }
+          },
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "runs": [{ "text": "daft punk discovery" }] },
+              "navigationEndpoint": {
+                "searchEndpoint": { "query": "daft punk discovery" }
+              }
+            }
+          },
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "runs": [{ "text": "daft punk" }] },
+              "unknownField": true
+            }
+          },
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "runs": [] }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {
+            "musicResponsiveListItemRenderer": {
+              "playlistItemData": { "videoId": "suggested-video" },
+              "flexColumns": [
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "Suggested Song" }] }
+                  }
+                },
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": {
+                      "runs": [
+                        { "text": "Song" },
+                        { "text": " • " },
+                        {
+                          "text": "Suggested Artist",
+                          "navigationEndpoint": {
+                            "browseEndpoint": {
+                              "browseId": "UC-suggested-artist",
+                              "browseEndpointContextSupportedConfigs": {
+                                "browseEndpointContextMusicConfig": {
+                                  "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        { "text": " • " },
+                        { "text": "3:21" }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "thumbnail": {
+                "musicThumbnailRenderer": {
+                  "thumbnail": {
+                    "thumbnails": [
+                      { "url": "https://example.invalid/suggested-song.jpg", "width": 226, "height": 226 }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "musicResponsiveListItemRenderer": {
+              "navigationEndpoint": {
+                "browseEndpoint": {
+                  "browseId": "MPRE-suggested-album",
+                  "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": {
+                      "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                    }
+                  }
+                }
+              },
+              "flexColumns": [
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "Suggested Album" }] }
+                  }
+                },
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": {
+                      "runs": [
+                        { "text": "Album" },
+                        { "text": " • " },
+                        { "text": "Suggested Artist" }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "thumbnail": {
+                "musicThumbnailRenderer": {
+                  "thumbnail": {
+                    "thumbnails": [
+                      { "url": "https://example.invalid/suggested-album.jpg", "width": 226, "height": 226 }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "musicResponsiveListItemRenderer": {
+              "playlistItemData": { "videoId": "suggested-video" },
+              "flexColumns": [
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "Duplicate Song" }] }
+                  }
+                },
+                {
+                  "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "Suggested Artist" }] }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "unknownTopLevel": { "ignored": true }
+}

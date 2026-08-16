@@ -1,0 +1,87 @@
+{
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicResponsiveHeaderRenderer": {
+                      "title": { "runs": [{ "text": "Fixture Podcast" }] },
+                      "straplineTextOne": {
+                        "runs": [
+                          {
+                            "text": "Fixture Host",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "UCfixture-host",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_USER_CHANNEL"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "secondSubtitle": { "runs": [{ "text": "42 episodes" }] },
+                      "thumbnail": {
+                        "musicThumbnailRenderer": {
+                          "thumbnail": {
+                            "thumbnails": [
+                              { "url": "https://i.ytimg.com/fixture-podcast-large.jpg", "width": 1024, "height": 1024 }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "secondaryContents": {
+        "sectionListRenderer": {
+          "contents": [
+            {
+              "musicShelfRenderer": {
+                "contents": [
+                  {
+                    "musicMultiRowListItemRenderer": {
+                      "onTap": { "watchEndpoint": { "videoId": "fixture-detail-episode" } },
+                      "title": { "runs": [{ "text": "Detail Episode" }] },
+                      "subtitle": {
+                        "runs": [
+                          { "text": "Feb 2026" },
+                          { "text": " · " },
+                          { "text": "58:07" }
+                        ]
+                      },
+                      "thumbnail": {
+                        "musicThumbnailRenderer": {
+                          "thumbnail": {
+                            "thumbnails": [
+                              { "url": "https://i.ytimg.com/fixture-detail.jpg", "width": 544, "height": 544 }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                ],
+                "continuations": [
+                  { "nextContinuationData": { "continuation": "podcast-detail-continuation" } }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

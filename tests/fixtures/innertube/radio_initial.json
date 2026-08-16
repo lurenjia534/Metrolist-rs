@@ -1,0 +1,141 @@
+{
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            {
+              "tabRenderer": {
+                "content": {
+                  "musicQueueRenderer": {
+                    "header": {
+                      "musicQueueHeaderRenderer": {
+                        "subtitle": { "runs": [{ "text": "Fixture radio" }] }
+                      }
+                    },
+                    "content": {
+                      "playlistPanelRenderer": {
+                        "contents": [
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "seed-song",
+                              "title": { "runs": [{ "text": "Seed song" }] },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Seed Artist",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UC-seed",
+                                        "browseEndpointContextSupportedConfigs": {
+                                          "browseEndpointContextMusicConfig": {
+                                            "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  },
+                                  { "text": " • " },
+                                  { "text": "Seed Album" },
+                                  { "text": " • " },
+                                  { "text": "3:31" }
+                                ]
+                              },
+                              "lengthText": { "runs": [{ "text": "3:31" }] },
+                              "thumbnail": {
+                                "thumbnails": [
+                                  { "url": "https://example.invalid/seed.jpg", "width": 120, "height": 120 }
+                                ]
+                              },
+                              "selected": true
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "recommended-one",
+                              "title": { "runs": [{ "text": "Recommended one" }] },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Radio Artist",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UC-radio",
+                                        "browseEndpointContextSupportedConfigs": {
+                                          "browseEndpointContextMusicConfig": {
+                                            "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  },
+                                  { "text": " • " },
+                                  { "text": "4:02" }
+                                ]
+                              },
+                              "lengthText": { "runs": [{ "text": "4:02" }] },
+                              "thumbnail": {
+                                "thumbnails": [
+                                  { "url": "https://example.invalid/recommended-one.jpg", "width": 226, "height": 226 }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "recommended-one",
+                              "title": { "runs": [{ "text": "Duplicate recommendation" }] },
+                              "longBylineText": { "runs": [{ "text": "Radio Artist" }] }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "incomplete-song",
+                              "title": { "runs": [{ "text": "Missing artist" }] }
+                            }
+                          },
+                          {
+                            "automixPreviewVideoRenderer": {
+                              "content": {
+                                "automixPlaylistVideoRenderer": {
+                                  "navigationEndpoint": {
+                                    "watchPlaylistEndpoint": {
+                                      "playlistId": "RDAMVM-automix",
+                                      "params": "wAEB"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "continuations": [
+                          {
+                            "nextRadioContinuationData": {
+                              "continuation": "radio-token-one"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            { "tabRenderer": {} },
+            {
+              "tabRenderer": {
+                "endpoint": {
+                  "browseEndpoint": {
+                    "browseId": "MPTR-related",
+                    "params": "related-params"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

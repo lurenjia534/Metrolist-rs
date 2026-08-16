@@ -1,0 +1,55 @@
+{
+  "continuationContents": {
+    "sectionListContinuation": {
+      "contents": [
+        {
+          "musicCarouselShelfRenderer": {
+            "header": {
+              "musicCarouselShelfBasicHeaderRenderer": {
+                "title": { "runs": [{ "text": "More picks" }] }
+              }
+            },
+            "contents": [
+              {
+                "musicTwoRowItemRenderer": {
+                  "title": { "runs": [{ "text": "Repeated Song" }] },
+                  "subtitle": { "runs": [{ "text": "Home Artist" }] },
+                  "navigationEndpoint": {
+                    "watchEndpoint": { "videoId": "home-song-one" }
+                  }
+                }
+              },
+              {
+                "musicMultiRowListItemRenderer": {
+                  "title": { "runs": [{ "text": "Continued Song" }] },
+                  "subtitle": {
+                    "runs": [
+                      {
+                        "text": "Continued Artist",
+                        "navigationEndpoint": {
+                          "browseEndpoint": { "browseId": "UC-continued-artist" }
+                        }
+                      },
+                      { "text": " • " },
+                      { "text": "2:34" }
+                    ]
+                  },
+                  "onTap": {
+                    "watchEndpoint": { "videoId": "home-song-three" }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "continuations": [
+        {
+          "nextContinuationData": {
+            "continuation": "home-continuation-two"
+          }
+        }
+      ]
+    }
+  }
+}

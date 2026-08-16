@@ -1,0 +1,63 @@
+{
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicResponsiveListItemRenderer": {
+            "navigationEndpoint": {
+              "browseEndpoint": {
+                "browseId": "MPRE-album-one",
+                "browseEndpointContextSupportedConfigs": {
+                  "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ALBUM" }
+                }
+              }
+            },
+            "flexColumns": [
+              { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Fixture Album" }] } } },
+              { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Album" }, { "text": " • " }, { "text": "Fixture Artist" }, { "text": " • " }, { "text": "2026" }] } } }
+            ],
+            "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://example.invalid/album-small.jpg", "width": 60, "height": 60 }, { "url": "https://example.invalid/album.jpg", "width": 226, "height": 226 }] } } }
+          }
+        },
+        {
+          "musicResponsiveListItemRenderer": {
+            "navigationEndpoint": {
+              "browseEndpoint": {
+                "browseId": "UC-artist-one",
+                "browseEndpointContextSupportedConfigs": {
+                  "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ARTIST" }
+                }
+              }
+            },
+            "flexColumns": [
+              { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Fixture Artist" }] } } },
+              { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Artist" }, { "text": " • " }, { "text": "1M subscribers" }] } } }
+            ]
+          }
+        },
+        {
+          "musicTwoRowItemRenderer": {
+            "navigationEndpoint": {
+              "browseEndpoint": {
+                "browseId": "VL-playlist-one",
+                "browseEndpointContextSupportedConfigs": {
+                  "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_PLAYLIST" }
+                }
+              }
+            },
+            "title": { "runs": [{ "text": "Fixture Playlist" }] },
+            "subtitle": { "runs": [{ "text": "Fixture Curator" }, { "text": " • " }, { "text": "12 songs" }] },
+            "thumbnailRenderer": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://example.invalid/playlist.jpg", "width": 320, "height": 320 }] } } }
+          }
+        },
+        {
+          "musicResponsiveListItemRenderer": {
+            "navigationEndpoint": { "browseEndpoint": { "browseId": "MPRE-album-one" } },
+            "flexColumns": [{ "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Duplicate Album" }] } } }]
+          }
+        }
+      ],
+      "continuations": [{ "nextContinuationData": { "continuation": "catalog-continuation" } }]
+    }
+  }
+}

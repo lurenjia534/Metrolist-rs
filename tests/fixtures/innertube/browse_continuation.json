@@ -1,0 +1,108 @@
+{
+  "continuationContents": {
+    "musicPlaylistShelfContinuation": {
+      "contents": [
+        {
+          "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": "playlist-song-two", "playlistSetVideoId": "set-video-two" },
+            "flexColumns": [
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": { "runs": [{ "text": "Playlist Song Two" }] }
+                }
+              },
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": {
+                    "runs": [
+                      {
+                        "text": "Second Artist",
+                        "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-second" } }
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "fixedColumns": [
+              {
+                "musicResponsiveListItemFixedColumnRenderer": {
+                  "text": { "runs": [{ "text": "4:00" }] }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": "playlist-song-three", "playlistSetVideoId": "set-video-three" },
+            "flexColumns": [
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": { "runs": [{ "text": "Playlist Song Three" }] }
+                }
+              },
+              {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                  "text": {
+                    "runs": [
+                      {
+                        "text": "Third Artist",
+                        "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-third" } }
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "fixedColumns": [
+              {
+                "musicResponsiveListItemFixedColumnRenderer": {
+                  "text": { "runs": [{ "text": "5:00" }] }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "onResponseReceivedActions": [
+    {
+      "appendContinuationItemsAction": {
+        "continuationItems": [
+          {
+            "musicTwoRowItemRenderer": {
+              "navigationEndpoint": {
+                "browseEndpoint": {
+                  "browseId": "MPRE-continuation-related",
+                  "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ALBUM" }
+                  }
+                }
+              },
+              "title": { "runs": [{ "text": "Continuation Album" }] },
+              "subtitle": { "runs": [{ "text": "Third Artist" }] },
+              "thumbnailRenderer": {
+                "musicThumbnailRenderer": {
+                  "thumbnail": {
+                    "thumbnails": [
+                      { "url": "https://example.invalid/continued-album.jpg", "width": 320, "height": 320 }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "continuationItemRenderer": {
+              "continuationEndpoint": {
+                "continuationCommand": { "token": "browse-continuation-two" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

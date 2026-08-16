@@ -1,0 +1,48 @@
+{
+  "actions": [
+    {
+      "openPopupAction": {
+        "popup": {
+          "multiPageMenuRenderer": {
+            "header": {
+              "activeAccountHeaderRenderer": {
+                "accountName": {
+                  "runs": [
+                    { "text": "Fixture Listener" }
+                  ]
+                },
+                "email": {
+                  "runs": [
+                    { "text": "listener@example.invalid" }
+                  ]
+                },
+                "channelHandle": {
+                  "runs": [
+                    { "text": "@fixture-listener" }
+                  ]
+                },
+                "accountPhoto": {
+                  "thumbnails": [
+                    {
+                      "url": "https://example.invalid/avatar-small.jpg",
+                      "width": 48,
+                      "height": 48
+                    },
+                    {
+                      "url": "https://example.invalid/avatar-large.jpg",
+                      "width": 192,
+                      "height": 192
+                    }
+                  ]
+                },
+                "unknownFutureField": {
+                  "ignored": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

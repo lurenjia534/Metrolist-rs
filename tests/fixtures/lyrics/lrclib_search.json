@@ -1,0 +1,32 @@
+[
+  {
+    "id": 101,
+    "trackName": "Fixture Song",
+    "artistName": "Fixture Artist",
+    "albumName": "Fixture Album",
+    "duration": 180.1,
+    "instrumental": false,
+    "plainLyrics": "First fixture line\nSecond fixture line",
+    "syncedLyrics": null
+  },
+  {
+    "id": 102,
+    "trackName": "Fixture Song",
+    "artistName": "Fixture Artist",
+    "albumName": "Fixture Album",
+    "duration": 183.9,
+    "instrumental": false,
+    "plainLyrics": "First fixture line\nSecond fixture line",
+    "syncedLyrics": "[00:01.00]First fixture line\n[00:03.25]Second fixture line"
+  },
+  {
+    "id": 103,
+    "trackName": "Unrelated Song",
+    "artistName": "Different Artist",
+    "albumName": null,
+    "duration": 250.0,
+    "instrumental": false,
+    "plainLyrics": "Unrelated fixture text",
+    "syncedLyrics": null
+  }
+]

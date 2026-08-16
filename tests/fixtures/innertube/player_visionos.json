@@ -1,0 +1,59 @@
+{
+  "playabilityStatus": {
+    "status": "OK"
+  },
+  "playerConfig": {
+    "audioConfig": {
+      "loudnessDb": -6.25,
+      "perceptualLoudnessDb": -13.25
+    }
+  },
+  "streamingData": {
+    "expiresInSeconds": "21540",
+    "adaptiveFormats": [
+      {
+        "itag": 139,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
+        "bitrate": 50000,
+        "contentLength": "2000000",
+        "url": "https://example.invalid/low-aac"
+      },
+      {
+        "itag": 140,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 96000,
+        "audioQuality": "AUDIO_QUALITY_LOW",
+        "contentLength": "3100000",
+        "url": "https://example.invalid/low-direct-aac"
+      },
+      {
+        "itag": 140,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 130000,
+        "audioQuality": "AUDIO_QUALITY_HIGH",
+        "contentLength": "4200000",
+        "url": "https://example.invalid/selected-aac"
+      },
+      {
+        "itag": 251,
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 155000,
+        "contentLength": "5000000",
+        "url": "https://example.invalid/opus"
+      },
+      {
+        "itag": 141,
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 256000,
+        "contentLength": "9000000",
+        "signatureCipher": "redacted"
+      }
+    ],
+    "futureUnknownField": true
+  },
+  "playbackTracking": {
+    "videostatsPlaybackUrl": {
+      "baseUrl": "https://s.youtube.com/api/stats/playback?docid=fixture-video&ei=redacted-fixture"
+    }
+  }
+}

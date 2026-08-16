@@ -1,0 +1,214 @@
+{
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "header": {
+                  "chipCloudRenderer": {
+                    "chips": [
+                      {
+                        "chipCloudChipRenderer": {
+                          "text": { "runs": [{ "text": "Energize" }] },
+                          "navigationEndpoint": {
+                            "browseEndpoint": {
+                              "browseId": "FEmusic_home",
+                              "params": "energize-params"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "chipCloudChipRenderer": {
+                          "text": { "runs": [{ "text": "Relax" }] },
+                          "navigationEndpoint": {
+                            "browseEndpoint": {
+                              "browseId": "FEmusic_home",
+                              "params": "relax-params"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "chipCloudChipRenderer": {
+                          "text": { "runs": [] }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "contents": [
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Quick picks" }] },
+                          "strapline": { "runs": [{ "text": "Start a radio from a song" }] },
+                          "moreContentButton": {
+                            "buttonRenderer": {
+                              "navigationEndpoint": {
+                                "browseEndpoint": {
+                                  "browseId": "FEmusic_quick_picks",
+                                  "params": "quick-picks-params"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "playlistItemData": { "videoId": "home-song-one" },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": { "runs": [{ "text": "Home Song One" }] }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Home Artist",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "UC-home-artist",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": {
+                                                "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      { "text": " • " },
+                                      { "text": "3:12" }
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "thumbnail": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    { "url": "https://example.invalid/home-one-small.jpg", "width": 60, "height": 60 },
+                                    { "url": "https://example.invalid/home-one.jpg", "width": 226, "height": 226 }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "playlistItemData": { "videoId": "home-song-one" },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": { "runs": [{ "text": "Duplicate Home Song" }] }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": { "runs": [{ "text": "Home Artist" }] }
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "playlistItemData": { "videoId": "missing-columns" },
+                            "flexColumns": []
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Albums for you" }] }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Home Album" }] },
+                            "subtitle": { "runs": [{ "text": "Home Artist • Album" }] },
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "MPRE-home-album",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                  }
+                                }
+                              }
+                            },
+                            "thumbnailRenderer": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    { "url": "https://example.invalid/home-album.jpg", "width": 300, "height": 300 }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Home Song Two" }] },
+                            "subtitle": {
+                              "runs": [
+                                {
+                                  "text": "Second Artist",
+                                  "navigationEndpoint": {
+                                    "browseEndpoint": { "browseId": "UC-second-artist" }
+                                  }
+                                },
+                                { "text": " • " },
+                                { "text": "4:05" }
+                              ]
+                            },
+                            "navigationEndpoint": {
+                              "watchEndpoint": { "videoId": "home-song-two" }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [] }
+                        }
+                      },
+                      "contents": [{ "unknownRenderer": {} }]
+                    }
+                  }
+                ],
+                "continuations": [
+                  {
+                    "nextContinuationData": {
+                      "continuation": "home-continuation-one"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
