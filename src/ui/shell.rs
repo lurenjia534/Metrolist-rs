@@ -1,21 +1,29 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Selectable, StyledExt, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Collapsible, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, Theme,
+    ThemeMode, VirtualListScrollHandle, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
+    group_box::{GroupBox, GroupBoxVariants},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
+    sidebar::{
+        Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarItem as _,
+        SidebarMenu, SidebarMenuItem, SidebarToggleButton,
+    },
     slider::{Slider, SliderEvent, SliderState},
     tab::{Tab, TabBar},
-    v_flex,
+    v_flex, v_virtual_list,
 };
 use http_client::Url;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -25,12 +33,13 @@ use std::{
 use zeroize::Zeroizing;
 
 use crate::domain::{
-    BrowseItem, BrowseKind, BrowsePage, ExplorePage, HomeChip, HomeItem, HomePage, HomeSection,
-    LyricsDocument, PlaylistEntry, RemoteHistoryPage, Song,
+    BrowseItem, BrowseKind, BrowsePage, BrowsePlaybackEndpoint, ExplorePage, HomeChip, HomeItem,
+    HomePage, HomeSection, LyricsDocument, PlaylistEntry, RemoteHistoryEntry, RemoteHistoryPage,
+    Song,
 };
 use crate::services::innertube::{
-    AccountProfile, InnerTubeClient, InnerTubeSession, PlaybackTrackingUrl, RadioEndpoint,
-    RadioPage, ResolvedPlayback, SearchFilter, SearchResult, SearchSuggestions,
+    AccountProfile, InnerTubeClient, InnerTubeSession, MediaInfo, PlaybackTrackingUrl,
+    RadioEndpoint, RadioPage, ResolvedPlayback, SearchFilter, SearchResult, SearchSuggestions,
 };
 use crate::services::{
     AudioCache, AudioDeviceOperation, AudioPlayer, AuthSession, AutoEqClient, AutoEqEntry,
@@ -46,32 +55,123 @@ use crate::services::{
     ListenTogetherPlaybackActionPayload, ListenTogetherPlaybackObservation,
     ListenTogetherPlaybackTracker, ListenTogetherRoomRole, ListenTogetherRoomState,
     ListenTogetherSnapshot, ListenTogetherTrack, LyricsClient, MAX_AUTO_EQ_SEARCH_RESULTS,
-    MAX_EQUALIZER_APO_FILE_BYTES, MicrophoneCancellation, MicrophoneRecorder, PlaybackSource,
-    PlaybackSourceAccess, PlaybackState, Queue, QueueItem, RECOGNITION_CAPTURE_DURATION,
-    RECOGNITION_SAMPLE_RATE, RecognitionClient, RecognitionResult, RepeatMode, ThumbnailCache,
-    download_song, equalizer_frequency_response, generate_shazam_signature, launch_account_login,
-    linear_resample_mono_i16, parse_equalizer_apo, search_auto_eq_models,
+    MAX_EQUALIZER_APO_FILE_BYTES, MicrophoneCancellation, MicrophoneRecorder, PlaybackSnapshot,
+    PlaybackSource, PlaybackSourceAccess, PlaybackState, Queue, QueueItem,
+    RECOGNITION_CAPTURE_DURATION, RECOGNITION_SAMPLE_RATE, RecognitionClient, RecognitionResult,
+    RepeatMode, ThumbnailCache, download_song, equalizer_frequency_response,
+    generate_shazam_signature, launch_account_login, linear_resample_mono_i16, parse_equalizer_apo,
+    search_auto_eq_models,
 };
 use crate::storage::{
     AudioDownload, DesktopStore, DownloadState, FavoriteEntry, HistoryEntry, ListeningStats,
-    LocalPlaylist, PersistedPlaybackSource, PersistedSession, PlaylistSort, PodcastSubscription,
-    RecognitionHistoryEntry, SavedEpisode, SearchHistoryEntry, SongListeningStats, SortDirection,
+    LocalPlaylist, LocalPlaylistSongMetadata, PersistedPlaybackSource, PersistedSession,
+    PlaylistSort, PodcastSubscription, RecognitionHistoryEntry, SavedEpisode, SearchHistoryEntry,
+    SongListeningStats, SortDirection,
+};
+use crate::ui::widgets::{
+    caption_line, cover_frame, cover_play_badge, featured_card_shell, icon_ghost_button,
+    list_row_shell, media_text_block, media_tile_shell, section_heading, subtitle_line, tile_row,
+    title_line,
 };
 use crate::{
-    AppError, AppModel, AppSettings, AppTheme, AudioQuality, EQUALIZER_FREQUENCIES_HZ,
-    EqualizerPreset, EqualizerProfile, EqualizerSettings, LoudnessLevel, MAX_EQUALIZER_GAIN_MB,
-    MAX_PLAYBACK_RATE_MILLI, MAX_TRANSPOSE_SEMITONES, MIN_EQUALIZER_GAIN_MB,
-    MIN_PLAYBACK_RATE_MILLI, MIN_TRANSPOSE_SEMITONES, PLAYBACK_RATE_STEP_MILLI, PlaybackParameters,
-    ProxyKind, Route,
+    AppError, AppModel, AppSettings, AppTheme, AudioQuality, CONTENT_COUNTRIES, CONTENT_LANGUAGES,
+    EQUALIZER_FREQUENCIES_HZ, EqualizerPreset, EqualizerProfile, EqualizerSettings, LoudnessLevel,
+    MAX_CROSSFADE_SECONDS, MAX_EQUALIZER_GAIN_MB, MAX_HISTORY_DURATION_SECONDS,
+    MAX_PLAYBACK_RATE_MILLI, MAX_TRANSPOSE_SEMITONES, MIN_CROSSFADE_SECONDS, MIN_EQUALIZER_GAIN_MB,
+    MIN_HISTORY_DURATION_SECONDS, MIN_PLAYBACK_RATE_MILLI, MIN_TRANSPOSE_SEMITONES,
+    PLAYBACK_RATE_STEP_MILLI, PlaybackParameters, ProxyKind, Route, SYSTEM_CONTENT_LOCALE,
+    content_country_name, content_language_name,
 };
 
-const HISTORY_THRESHOLD: Duration = Duration::from_secs(30);
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_CONSECUTIVE_PLAYBACK_ERRORS: u8 = 5;
 const EPISODE_POSITION_THRESHOLD: Duration = Duration::from_secs(3);
 const EPISODE_POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_MEMORY_THUMBNAILS: usize = 256;
 const RADIO_PREFETCH_THRESHOLD: usize = 5;
 const MAX_PARALLEL_DOWNLOADS: usize = 3;
+const HISTORY_SECTION_ROW_HEIGHT: Pixels = px(32.);
+const HISTORY_ENTRY_ROW_HEIGHT: Pixels = px(60.);
+const MIN_SLEEP_TIMER_MINUTES: u16 = 5;
+const MAX_SLEEP_TIMER_MINUTES: u16 = 120;
+const DEFAULT_SLEEP_TIMER_MINUTES: u16 = 30;
+const SLEEP_TIMER_FADE_OUT_WINDOW: Duration = Duration::from_secs(60);
+const ARTWORK_SEEK_STEP: Duration = Duration::from_secs(5);
+const PROGRESSIVE_SEEK_WINDOW: Duration = Duration::from_secs(1);
+
+fn csv_field(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn local_playlist_csv(songs: &[Song]) -> String {
+    let mut output = String::from("Title,Artist,Album,YouTube Video ID\n");
+    for song in songs {
+        output.push_str(&csv_field(&song.title));
+        output.push(',');
+        output.push_str(&csv_field(
+            &song
+                .artists
+                .iter()
+                .map(|artist| artist.name.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+        output.push(',');
+        output.push_str(&csv_field(
+            song.album
+                .as_ref()
+                .map(|album| album.title.as_str())
+                .unwrap_or_default(),
+        ));
+        output.push(',');
+        output.push_str(&song.video_id);
+        output.push('\n');
+    }
+    output
+}
+
+fn local_playlist_m3u(songs: &[Song]) -> String {
+    let mut output = String::from("#EXTM3U\n");
+    for song in songs {
+        let duration = song
+            .duration
+            .map(|duration| duration.as_secs().to_string())
+            .unwrap_or_else(|| "-1".into());
+        let artists = song
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(";");
+        output.push_str(&format!("#EXTINF:{duration},{artists} - {}\n", song.title));
+        output.push_str(&format!("https://youtube.com/watch?v={}\n", song.video_id));
+    }
+    output
+}
+
+fn playlist_export_filename(name: &str, extension: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let stem = sanitized.trim_matches(|character| character == ' ' || character == '.');
+    format!(
+        "{}.{}",
+        if stem.is_empty() { "playlist" } else { stem },
+        extension
+    )
+}
 
 enum SearchViewState {
     Idle,
@@ -266,6 +366,44 @@ fn explore_catalog_items(page: &ExplorePage) -> Vec<BrowseItem> {
     items
 }
 
+fn song_artist_browse_items(song: &Song) -> Vec<BrowseItem> {
+    let mut browse_ids = HashSet::new();
+    song.artists
+        .iter()
+        .filter_map(|artist| {
+            let browse_id = artist.id.as_ref()?;
+            if browse_id.trim().is_empty() || !browse_ids.insert(browse_id.clone()) {
+                return None;
+            }
+            Some(BrowseItem {
+                browse_id: browse_id.clone(),
+                kind: BrowseKind::Artist,
+                title: artist.name.clone(),
+                subtitle: "Artist".into(),
+                thumbnail_url: song.thumbnail_url.clone(),
+                params: None,
+                editable: false,
+            })
+        })
+        .collect()
+}
+
+fn song_album_browse_item(song: &Song) -> Option<BrowseItem> {
+    let album = song.album.as_ref()?;
+    if album.browse_id.trim().is_empty() {
+        return None;
+    }
+    Some(BrowseItem {
+        browse_id: album.browse_id.clone(),
+        kind: BrowseKind::Album,
+        title: album.title.clone(),
+        subtitle: "Album".into(),
+        thumbnail_url: album.thumbnail_url.clone(),
+        params: None,
+        editable: false,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LocalSearchFilter {
     #[default]
@@ -306,8 +444,14 @@ enum QueueEndAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SleepTimer {
-    Deadline(Instant),
-    EndOfSong,
+    Deadline {
+        deadline: Instant,
+        stop_after_current_song: bool,
+        fade_out: bool,
+    },
+    EndOfSong {
+        fade_out: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -316,6 +460,8 @@ enum NowPlayingTab {
     UpNext,
     Lyrics,
     Related,
+    Details,
+    Equalizer,
 }
 
 impl NowPlayingTab {
@@ -324,6 +470,8 @@ impl NowPlayingTab {
             Self::UpNext => 0,
             Self::Lyrics => 1,
             Self::Related => 2,
+            Self::Details => 3,
+            Self::Equalizer => 4,
         }
     }
 
@@ -331,27 +479,100 @@ impl NowPlayingTab {
         match index {
             1 => Self::Lyrics,
             2 => Self::Related,
+            3 => Self::Details,
+            4 => Self::Equalizer,
             _ => Self::UpNext,
         }
     }
 }
 
+#[derive(Clone)]
+enum MediaInfoViewState {
+    Loading(Song),
+    Loaded(Song, MediaInfo),
+    Failed(Song, String),
+}
+
+impl MediaInfoViewState {
+    fn song(&self) -> &Song {
+        match self {
+            Self::Loading(song) | Self::Loaded(song, _) | Self::Failed(song, _) => song,
+        }
+    }
+
+    fn matches(&self, video_id: &str) -> bool {
+        self.song().video_id == video_id
+    }
+}
+
 impl SleepTimer {
     fn deadline_reached(self, now: Instant) -> bool {
-        matches!(self, Self::Deadline(deadline) if now >= deadline)
+        matches!(self, Self::Deadline { deadline, .. } if now >= deadline)
     }
 
     fn stops_after_song(self) -> bool {
-        self == Self::EndOfSong
+        matches!(self, Self::EndOfSong { .. })
+    }
+
+    fn after_deadline(self) -> Option<Self> {
+        match self {
+            Self::Deadline {
+                stop_after_current_song: true,
+                fade_out,
+                ..
+            } => Some(Self::EndOfSong { fade_out }),
+            Self::Deadline { .. } => None,
+            Self::EndOfSong { .. } => Some(self),
+        }
+    }
+
+    fn volume_multiplier(
+        self,
+        now: Instant,
+        position: Duration,
+        duration: Option<Duration>,
+    ) -> f32 {
+        let remaining = match self {
+            Self::Deadline {
+                deadline,
+                stop_after_current_song: false,
+                fade_out: true,
+            } => Some(deadline.saturating_duration_since(now)),
+            Self::EndOfSong { fade_out: true } => {
+                duration.map(|duration| duration.saturating_sub(position))
+            }
+            Self::Deadline { .. } | Self::EndOfSong { .. } => None,
+        };
+        remaining.map_or(1.0, |remaining| {
+            (remaining.as_secs_f32() / SLEEP_TIMER_FADE_OUT_WINDOW.as_secs_f32()).clamp(0.0, 1.0)
+        })
     }
 
     fn summary(self, now: Instant) -> String {
         match self {
-            Self::Deadline(deadline) => format!(
-                "Stops in {}",
-                format_duration(deadline.saturating_duration_since(now))
-            ),
-            Self::EndOfSong => "Stops when this song ends".into(),
+            Self::Deadline {
+                deadline,
+                stop_after_current_song,
+                fade_out,
+            } => {
+                let behavior = if stop_after_current_song && fade_out {
+                    "then finishes this song with fade out"
+                } else if stop_after_current_song {
+                    "then finishes this song"
+                } else if fade_out {
+                    "with fade out"
+                } else {
+                    ""
+                };
+                format!(
+                    "Stops in {} {behavior}",
+                    format_duration(deadline.saturating_duration_since(now))
+                )
+                .trim()
+                .to_owned()
+            }
+            Self::EndOfSong { fade_out: true } => "Stops when this song ends with fade out".into(),
+            Self::EndOfSong { fade_out: false } => "Stops when this song ends".into(),
         }
     }
 }
@@ -382,6 +603,40 @@ enum HistorySource {
     YouTubeMusic,
 }
 
+#[derive(Clone)]
+enum HistoryListRow {
+    Section(String),
+    Local {
+        play_index: usize,
+        entry: HistoryEntry,
+    },
+    Remote {
+        play_index: usize,
+        entry: RemoteHistoryEntry,
+    },
+}
+
+impl HistoryListRow {
+    fn height(&self) -> Pixels {
+        match self {
+            Self::Section(_) => HISTORY_SECTION_ROW_HEIGHT,
+            Self::Local { .. } | Self::Remote { .. } => HISTORY_ENTRY_ROW_HEIGHT,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SongOverflowPlay {
+    SearchResult { index: usize },
+    Collection { songs: Arc<Vec<Song>>, index: usize },
+}
+
+#[derive(Clone)]
+enum HistoryEntryAction {
+    RemoveLocal { entry_id: i64 },
+    RemoveRemote { feedback_token: Option<String> },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LibraryTab {
     #[default]
@@ -391,6 +646,13 @@ enum LibraryTab {
     Albums,
     Artists,
     Podcasts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LibraryMixSort {
+    #[default]
+    Recent,
+    Name,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -433,6 +695,68 @@ impl LibrarySongSort {
             Self::Title => "Title",
             Self::Artist => "Artist",
             Self::PlayTime => "Play time",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PlaylistSongSort {
+    #[default]
+    Custom,
+    DateAdded,
+    Title,
+    Artist,
+    PlayTime,
+}
+
+impl PlaylistSongSort {
+    const ALL: [Self; 5] = [
+        Self::Custom,
+        Self::DateAdded,
+        Self::Title,
+        Self::Artist,
+        Self::PlayTime,
+    ];
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::DateAdded => "date-added",
+            Self::Title => "title",
+            Self::Artist => "artist",
+            Self::PlayTime => "play-time",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Custom => "Custom order",
+            Self::DateAdded => "Date added",
+            Self::Title => "Title",
+            Self::Artist => "Artist",
+            Self::PlayTime => "Play time",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistExportFormat {
+    Csv,
+    M3u,
+}
+
+impl PlaylistExportFormat {
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::M3u => "m3u",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::M3u => "M3U",
         }
     }
 }
@@ -631,11 +955,48 @@ enum PlaylistDetailState {
     Failed(LocalPlaylist, String),
 }
 
+#[derive(Clone)]
+enum LibraryMixEntry {
+    Song(Song),
+    Browse(BrowseItem),
+    LocalPlaylist(LocalPlaylist),
+}
+
+impl LibraryMixEntry {
+    fn title(&self) -> &str {
+        match self {
+            Self::Song(song) => &song.title,
+            Self::Browse(item) => &item.title,
+            Self::LocalPlaylist(playlist) => &playlist.name,
+        }
+    }
+
+    fn search_priority(&self) -> u8 {
+        match self {
+            Self::LocalPlaylist(_) => 0,
+            Self::Browse(item) if item.kind == BrowseKind::Playlist => 0,
+            Self::Song(_) => 1,
+            Self::Browse(item) if item.kind == BrowseKind::Artist => 2,
+            Self::Browse(item) if item.kind == BrowseKind::Album => 3,
+            Self::Browse(_) => 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsOperation {
     #[default]
     Idle,
     Applying,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StorageOperation {
+    #[default]
+    Idle,
+    ClearingPlaybackCache,
+    ClearingArtworkCache,
+    RemovingDownloads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -753,6 +1114,12 @@ impl CloudLibraryData {
             .any(|song| song.video_id == video_id)
     }
 
+    fn video_in_library(&self, video_id: &str) -> bool {
+        self.library_songs
+            .iter()
+            .any(|song| song.video_id == video_id)
+    }
+
     fn playlist_liked(&self, playlist_id: &str) -> bool {
         let playlist_id = ui_playlist_id(playlist_id);
         self.playlists
@@ -773,6 +1140,17 @@ impl CloudLibraryData {
             .retain(|existing| existing.video_id != song.video_id);
         if liked {
             self.liked_songs.insert(0, song);
+        }
+    }
+
+    fn set_video_in_library(&mut self, song: Song, in_library: bool) {
+        self.library_songs
+            .retain(|existing| existing.video_id != song.video_id);
+        if in_library {
+            self.library_songs.insert(0, song);
+        } else {
+            self.liked_songs
+                .retain(|existing| existing.video_id != song.video_id);
         }
     }
 
@@ -818,6 +1196,7 @@ enum CloudLibraryOperation {
     #[default]
     Idle,
     SettingVideoLike,
+    SettingSongLibrary,
     SettingPlaylistLike,
     SettingAlbumLike,
     SettingSubscription,
@@ -847,6 +1226,8 @@ enum LibraryOperation {
     SortingPlaylists,
     AddingToPlaylist,
     RemovingFromPlaylist,
+    ReorderingPlaylist,
+    UpdatingPlaylistCover,
     RenamingPlaylist,
     DeletingPlaylist,
     ClearingHistory,
@@ -988,13 +1369,35 @@ enum RadioRequest {
         seed_video_id: String,
         replace_future: bool,
     },
+    Endpoint {
+        endpoint: BrowsePlaybackEndpoint,
+        title: String,
+        shuffled: bool,
+    },
     Continuation(Box<RadioSession>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowseCollectionAction {
+    PlayAll,
+    Shuffle,
+    PlayNext,
+    AddToQueue,
+    AddToLocalPlaylist,
+    DownloadAll,
 }
 
 impl RadioRequest {
     fn seed_video_id(&self) -> &str {
         match self {
             Self::Initial { seed_video_id, .. } => seed_video_id,
+            Self::Endpoint {
+                endpoint, title, ..
+            } => endpoint
+                .video_id
+                .as_deref()
+                .or(endpoint.playlist_id.as_deref())
+                .unwrap_or(title),
             Self::Continuation(session) => &session.seed_video_id,
         }
     }
@@ -1089,9 +1492,12 @@ pub struct MetrolistShell {
     model: AppModel,
     search_input: Entity<InputState>,
     history_search_input: Entity<InputState>,
+    library_mix_search_input: Entity<InputState>,
     library_search_input: Entity<InputState>,
     library_catalog_search_input: Entity<InputState>,
     library_playlist_search_input: Entity<InputState>,
+    playlist_detail_search_input: Entity<InputState>,
+    podcast_episode_search_input: Entity<InputState>,
     autoeq_search_input: Entity<InputState>,
     playlist_name_input: Entity<InputState>,
     playlist_rename_input: Entity<InputState>,
@@ -1133,6 +1539,7 @@ pub struct MetrolistShell {
     stats_task: Option<Task<()>>,
     history_query: String,
     browse_state: Option<BrowseViewState>,
+    browse_back_stack: Vec<BrowsePage>,
     browse_return_route: Route,
     search_loading_more: bool,
     search_load_more_error: Option<String>,
@@ -1140,6 +1547,8 @@ pub struct MetrolistShell {
     browse_loading_more: bool,
     browse_load_more_error: Option<String>,
     browse_seen_continuations: HashSet<String>,
+    browse_collection_action: Option<BrowseCollectionAction>,
+    browse_collection_action_error: Option<String>,
     thumbnail_cache: Option<ThumbnailCache>,
     thumbnail_images: HashMap<String, Arc<Image>>,
     thumbnail_order: VecDeque<String>,
@@ -1163,6 +1572,7 @@ pub struct MetrolistShell {
     lyrics_task: Option<Task<()>>,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
+    history_duration_slider: Entity<SliderState>,
     audio_player: DesktopAudioPlayer,
     audio_cache: Arc<AudioCache>,
     downloaded_audio: Arc<DownloadedAudioStore>,
@@ -1177,23 +1587,39 @@ pub struct MetrolistShell {
     queue: Queue,
     repeat_mode: RepeatMode,
     shuffle_enabled: bool,
+    shuffle_primary_len: usize,
     sleep_timer: Option<SleepTimer>,
+    sleep_timer_minutes: u16,
+    sleep_timer_volume_multiplier: f32,
+    sleep_timer_song_id: Option<String>,
     radio_state: RadioQueueState,
     radio_task: Option<Task<()>>,
+    auto_radio_refill_allowed: bool,
+    song_metadata_refreshing: Option<String>,
+    song_metadata_error: Option<String>,
+    song_metadata_task: Option<Task<()>>,
+    media_info_state: Option<MediaInfoViewState>,
+    media_info_task: Option<Task<()>>,
+    media_info_panel_visible: bool,
     queue_generation: u64,
     queue_visible: bool,
     now_playing_visible: bool,
+    sidebar_collapsed: bool,
     now_playing_tab: NowPlayingTab,
+    now_playing_notice: Option<String>,
+    last_artwork_seek: Option<Instant>,
+    artwork_seek_multiplier: u32,
     lyrics_visible: bool,
     playback_parameters_visible: bool,
     lyrics_state: LyricsViewState,
     lyrics_active_line: Option<usize>,
     lyrics_scroll: ScrollHandle,
-    playlist_picker_song: Option<Song>,
+    playlist_picker_song: Option<Vec<Song>>,
     cloud_playlist_picker_song: Option<Song>,
     settings: AppSettings,
     settings_draft: AppSettings,
     settings_operation: SettingsOperation,
+    storage_operation: StorageOperation,
     settings_error: Option<String>,
     settings_notice: Option<String>,
     settings_task: Option<Task<()>>,
@@ -1253,14 +1679,18 @@ pub struct MetrolistShell {
     remote_history_operation: RemoteHistoryOperation,
     remote_history_error: Option<String>,
     remote_history_task: Option<Task<()>>,
+    history_scroll_handle: VirtualListScrollHandle,
     current_song: Option<Song>,
     resolving_playback: bool,
     seeking: bool,
     seek_preview: Option<Duration>,
     last_playback_state: PlaybackState,
     playback_retry_count: u8,
+    consecutive_playback_errors: u8,
+    paused_by_mute: bool,
     playback_source_attempt: PlaybackSourceAttempt,
     play_after_resolution: Option<bool>,
+    pending_crossfade_duration: Option<Duration>,
     active_playback_source: Option<ActivePlaybackSource>,
     persisted_playback_source: Option<PersistedPlaybackSource>,
     pending_resume_position: Option<Duration>,
@@ -1273,6 +1703,12 @@ pub struct MetrolistShell {
     keep_listening_state: StoredViewState<Vec<Song>>,
     forgotten_favorites_state: StoredViewState<Vec<Song>>,
     favorites_state: StoredViewState<Vec<FavoriteEntry>>,
+    speed_dial_state: StoredViewState<Vec<Song>>,
+    speed_dial_browse_state: StoredViewState<Vec<BrowseItem>>,
+    speed_dial_local_playlists_state: StoredViewState<Vec<LocalPlaylist>>,
+    speed_dial_busy: Option<String>,
+    speed_dial_error: Option<String>,
+    speed_dial_notice: Option<String>,
     podcast_subscriptions: StoredViewState<Vec<PodcastSubscription>>,
     episodes_for_later: StoredViewState<Vec<SavedEpisode>>,
     podcast_operation: PodcastOperation,
@@ -1284,9 +1720,22 @@ pub struct MetrolistShell {
     last_episode_progress_save: Instant,
     playlists_state: StoredViewState<Vec<LocalPlaylist>>,
     playlist_detail: Option<PlaylistDetailState>,
+    playlist_detail_query: String,
+    playlist_song_sort: PlaylistSongSort,
+    playlist_song_sort_direction: SortDirection,
+    playlist_song_metadata: HashMap<String, LocalPlaylistSongMetadata>,
+    playlist_selection_mode: bool,
+    playlist_selected_song_ids: HashSet<String>,
+    playlist_exporting: bool,
+    playlist_export_notice: Option<String>,
+    playlist_cover_notice: Option<String>,
     playlist_sort: PlaylistSort,
     playlist_sort_direction: SortDirection,
     library_tab: LibraryTab,
+    library_mix_query: String,
+    library_mix_sort: LibraryMixSort,
+    library_mix_sort_direction: SortDirection,
+    library_mix_create_visible: bool,
     library_song_source: LibrarySongSource,
     library_song_sort: LibrarySongSort,
     library_song_sort_direction: SortDirection,
@@ -1343,12 +1792,19 @@ impl MetrolistShell {
         });
         let history_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter title or artist"));
+        let library_mix_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search songs, playlists, albums, or artists")
+        });
         let library_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter title or artist"));
         let library_catalog_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter title or details"));
         let library_playlist_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search playlists"));
+        let playlist_detail_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search this playlist"));
+        let podcast_episode_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search episodes"));
         let autoeq_search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search headphone or earphone model")
         });
@@ -1433,6 +1889,13 @@ impl MetrolistShell {
                 .step(0.01)
                 .default_value(audio_player.snapshot().volume)
         });
+        let history_duration_slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(MIN_HISTORY_DURATION_SECONDS))
+                .max(f32::from(MAX_HISTORY_DURATION_SECONDS))
+                .step(1.0)
+                .default_value(f32::from(settings.history_duration_seconds))
+        });
 
         let mut subscriptions = vec![cx.subscribe_in(&search_input, window, {
             let search_input = search_input.clone();
@@ -1465,6 +1928,16 @@ impl MetrolistShell {
             },
         ));
         subscriptions.push(cx.subscribe(
+            &library_mix_search_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.library_mix_query = input.read(cx).value().to_string();
+                    this.refresh_visible_thumbnails(cx);
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
             &library_search_input,
             |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1490,6 +1963,23 @@ impl MetrolistShell {
                 if matches!(event, InputEvent::Change) {
                     this.library_playlist_query = input.read(cx).value().to_string();
                     this.refresh_visible_thumbnails(cx);
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &playlist_detail_search_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.playlist_detail_query = input.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &podcast_episode_search_input,
+            |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             },
@@ -1596,13 +2086,28 @@ impl MetrolistShell {
                         value.end().clamp(0.0, 1.0)
                     }
                 };
-                this.audio_player.set_volume(volume);
+                this.set_local_volume(volume);
                 if matches!(event, SliderEvent::Release(_)) {
                     this.save_session(cx);
                 }
                 cx.notify();
             }),
         );
+        subscriptions.push(cx.subscribe(
+            &history_duration_slider,
+            |this, _, event: &SliderEvent, cx| {
+                let value = match event {
+                    SliderEvent::Change(value) | SliderEvent::Release(value) => value.end(),
+                };
+                this.settings_draft.history_duration_seconds = value.round().clamp(
+                    f32::from(MIN_HISTORY_DURATION_SECONDS),
+                    f32::from(MAX_HISTORY_DURATION_SECONDS),
+                ) as u16;
+                this.settings_error = None;
+                this.settings_notice = None;
+                cx.notify();
+            },
+        ));
         let playback_refresh_task = cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1630,6 +2135,9 @@ impl MetrolistShell {
                 keep_listening,
                 forgotten_favorites,
                 favorites,
+                speed_dial,
+                speed_dial_browse,
+                speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
                 catalog_items,
@@ -1643,6 +2151,9 @@ impl MetrolistShell {
                 initial_store.keep_listening(15, 5),
                 initial_store.forgotten_favorites(20),
                 initial_store.favorites(500),
+                initial_store.speed_dial_songs(),
+                initial_store.speed_dial_browse_items(),
+                initial_store.speed_dial_local_playlists(),
                 initial_store.podcast_subscriptions(),
                 initial_store.episodes_for_later(),
                 initial_store.catalog_items(2_000),
@@ -1692,6 +2203,9 @@ impl MetrolistShell {
                 keep_listening,
                 forgotten_favorites,
                 favorites,
+                speed_dial,
+                speed_dial_browse,
+                speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
                 catalog_items,
@@ -1708,6 +2222,9 @@ impl MetrolistShell {
                 keep_listening,
                 forgotten_favorites,
                 favorites,
+                speed_dial,
+                speed_dial_browse,
+                speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
                 catalog_items,
@@ -1741,6 +2258,18 @@ impl MetrolistShell {
                 };
                 this.favorites_state = match favorites {
                     Ok(favorites) => StoredViewState::Loaded(favorites),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.speed_dial_state = match speed_dial {
+                    Ok(songs) => StoredViewState::Loaded(songs),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.speed_dial_browse_state = match speed_dial_browse {
+                    Ok(items) => StoredViewState::Loaded(items),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.speed_dial_local_playlists_state = match speed_dial_local_playlists {
+                    Ok(playlists) => StoredViewState::Loaded(playlists),
                     Err(error) => StoredViewState::Failed(error.to_string()),
                 };
                 this.reload_daily_discover(cx);
@@ -1913,9 +2442,12 @@ impl MetrolistShell {
             model: AppModel::new(route),
             search_input,
             history_search_input,
+            library_mix_search_input,
             library_search_input,
             library_catalog_search_input,
             library_playlist_search_input,
+            playlist_detail_search_input,
+            podcast_episode_search_input,
             autoeq_search_input,
             playlist_name_input,
             playlist_rename_input,
@@ -1957,6 +2489,7 @@ impl MetrolistShell {
             stats_task: None,
             history_query: String::new(),
             browse_state: None,
+            browse_back_stack: Vec::new(),
             browse_return_route: Route::Search,
             search_loading_more: false,
             search_load_more_error: None,
@@ -1964,6 +2497,8 @@ impl MetrolistShell {
             browse_loading_more: false,
             browse_load_more_error: None,
             browse_seen_continuations: HashSet::new(),
+            browse_collection_action: None,
+            browse_collection_action_error: None,
             thumbnail_cache: Some(thumbnail_cache),
             thumbnail_images: HashMap::new(),
             thumbnail_order: VecDeque::new(),
@@ -1987,6 +2522,7 @@ impl MetrolistShell {
             lyrics_task: None,
             progress_slider,
             volume_slider,
+            history_duration_slider,
             audio_player,
             audio_cache,
             downloaded_audio,
@@ -2001,13 +2537,28 @@ impl MetrolistShell {
             queue: Queue::default(),
             repeat_mode: RepeatMode::Off,
             shuffle_enabled: false,
+            shuffle_primary_len: 0,
             sleep_timer: None,
+            sleep_timer_minutes: DEFAULT_SLEEP_TIMER_MINUTES,
+            sleep_timer_volume_multiplier: 1.0,
+            sleep_timer_song_id: None,
             radio_state: RadioQueueState::Idle,
             radio_task: None,
+            auto_radio_refill_allowed: true,
+            song_metadata_refreshing: None,
+            song_metadata_error: None,
+            song_metadata_task: None,
+            media_info_state: None,
+            media_info_task: None,
+            media_info_panel_visible: false,
             queue_generation: 0,
             queue_visible: false,
             now_playing_visible: false,
+            sidebar_collapsed: false,
             now_playing_tab: NowPlayingTab::UpNext,
+            now_playing_notice: None,
+            last_artwork_seek: None,
+            artwork_seek_multiplier: 1,
             lyrics_visible: false,
             playback_parameters_visible: false,
             lyrics_state: LyricsViewState::Idle,
@@ -2018,6 +2569,7 @@ impl MetrolistShell {
             settings: settings.clone(),
             settings_draft: settings,
             settings_operation: SettingsOperation::Idle,
+            storage_operation: StorageOperation::Idle,
             settings_error: None,
             settings_notice: None,
             settings_task: None,
@@ -2092,14 +2644,18 @@ impl MetrolistShell {
             remote_history_operation: RemoteHistoryOperation::Idle,
             remote_history_error: None,
             remote_history_task: None,
+            history_scroll_handle: VirtualListScrollHandle::new(),
             current_song: None,
             resolving_playback: false,
             seeking: false,
             seek_preview: None,
             last_playback_state: PlaybackState::Idle,
             playback_retry_count: 0,
+            consecutive_playback_errors: 0,
+            paused_by_mute: false,
             playback_source_attempt: PlaybackSourceAttempt::None,
             play_after_resolution: None,
+            pending_crossfade_duration: None,
             active_playback_source: None,
             persisted_playback_source: None,
             pending_resume_position: None,
@@ -2112,6 +2668,12 @@ impl MetrolistShell {
             keep_listening_state: StoredViewState::Loading,
             forgotten_favorites_state: StoredViewState::Loading,
             favorites_state: StoredViewState::Loading,
+            speed_dial_state: StoredViewState::Loading,
+            speed_dial_browse_state: StoredViewState::Loading,
+            speed_dial_local_playlists_state: StoredViewState::Loading,
+            speed_dial_busy: None,
+            speed_dial_error: None,
+            speed_dial_notice: None,
             podcast_subscriptions: StoredViewState::Loading,
             episodes_for_later: StoredViewState::Loading,
             podcast_operation: PodcastOperation::Idle,
@@ -2123,9 +2685,22 @@ impl MetrolistShell {
             last_episode_progress_save: now,
             playlists_state: StoredViewState::Loading,
             playlist_detail: None,
+            playlist_detail_query: String::new(),
+            playlist_song_sort: PlaylistSongSort::Custom,
+            playlist_song_sort_direction: SortDirection::Descending,
+            playlist_song_metadata: HashMap::new(),
+            playlist_selection_mode: false,
+            playlist_selected_song_ids: HashSet::new(),
+            playlist_exporting: false,
+            playlist_export_notice: None,
+            playlist_cover_notice: None,
             playlist_sort,
             playlist_sort_direction,
             library_tab: LibraryTab::Overview,
+            library_mix_query: String::new(),
+            library_mix_sort: LibraryMixSort::Recent,
+            library_mix_sort_direction: SortDirection::Descending,
+            library_mix_create_visible: false,
             library_song_source: LibrarySongSource::Liked,
             library_song_sort: LibrarySongSort::Recent,
             library_song_sort_direction: SortDirection::Descending,
@@ -2717,6 +3292,107 @@ impl MetrolistShell {
         });
     }
 
+    fn confirm_remove_playlist_downloads(
+        &mut self,
+        playlist_name: String,
+        video_ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if video_ids.is_empty()
+            || video_ids
+                .iter()
+                .any(|video_id| self.download_removals.contains(video_id))
+        {
+            return;
+        }
+        let download_count = video_ids.len();
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            let video_ids = video_ids.clone();
+            dialog
+                .title("Remove playlist downloads?")
+                .description(format!(
+                    "Remove {download_count} offline download record(s) for \"{playlist_name}\". Active downloads will be cancelled. The playlist, favourites, history, and YouTube Music data will be kept."
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Remove downloads")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    weak.update(cx, |this, cx| {
+                        for video_id in &video_ids {
+                            if this.download_for(video_id).is_some() {
+                                this.remove_download(video_id, cx);
+                            }
+                        }
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    fn confirm_remove_all_downloads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.storage_operation != StorageOperation::Idle {
+            return;
+        }
+        let video_ids = match &self.downloads_state {
+            StoredViewState::Loaded(downloads) => downloads
+                .iter()
+                .map(|download| download.song.video_id.clone())
+                .collect::<Vec<_>>(),
+            StoredViewState::Loading | StoredViewState::Failed(_) => return,
+        };
+        if video_ids.is_empty()
+            || video_ids
+                .iter()
+                .any(|video_id| self.download_removals.contains(video_id))
+        {
+            return;
+        }
+        let download_count = video_ids.len();
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            let video_ids = video_ids.clone();
+            dialog
+                .title("Remove all downloads?")
+                .description(format!(
+                    "Remove {download_count} offline download record(s) and cancel active downloads. Playlists, favourites, history, cached streaming audio, and YouTube Music data will be kept."
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Remove all downloads")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.storage_operation = StorageOperation::RemovingDownloads;
+                        this.settings_error = None;
+                        this.download_error = None;
+                        this.settings_notice = Some(format!(
+                            "Removing {download_count} offline download record(s)…"
+                        ));
+                        for video_id in &video_ids {
+                            if this.download_for(video_id).is_some() {
+                                this.remove_download(video_id, cx);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
     fn remove_download_files(&mut self, video_id: String, cx: &mut Context<Self>) {
         let resource_key = self
             .download_for(&video_id)
@@ -2743,6 +3419,29 @@ impl MetrolistShell {
                 match result {
                     Ok(records) => this.downloads_state = StoredViewState::Loaded(records),
                     Err(error) => this.download_error = Some(error.to_string()),
+                }
+                if this.storage_operation == StorageOperation::RemovingDownloads
+                    && this.download_removals.is_empty()
+                {
+                    this.storage_operation = StorageOperation::Idle;
+                    match &this.downloads_state {
+                        StoredViewState::Loaded(downloads) if downloads.is_empty() => {
+                            this.settings_notice = Some("All offline downloads removed.".into());
+                            this.settings_error = None;
+                            this.download_error = None;
+                        }
+                        StoredViewState::Loaded(_) => {
+                            this.settings_notice = None;
+                            this.settings_error = Some(
+                                "Some offline downloads could not be removed. Try again.".into(),
+                            );
+                        }
+                        StoredViewState::Failed(message) => {
+                            this.settings_notice = None;
+                            this.settings_error = Some(message.clone());
+                        }
+                        StoredViewState::Loading => {}
+                    }
                 }
                 this.start_queued_downloads(cx);
                 cx.notify();
@@ -3176,6 +3875,11 @@ impl MetrolistShell {
             .is_some_and(|library| library.video_liked(video_id))
     }
 
+    fn cloud_video_in_library(&self, video_id: &str) -> bool {
+        self.cloud_library()
+            .is_some_and(|library| library.video_in_library(video_id))
+    }
+
     fn cloud_playlist_liked(&self, playlist_id: &str) -> bool {
         self.cloud_library()
             .is_some_and(|library| library.playlist_liked(playlist_id))
@@ -3207,6 +3911,47 @@ impl MetrolistShell {
         let client = self.search_client.clone();
         self.cloud_mutation_task = Some(cx.spawn(async move |this, cx| {
             let result = client.set_video_liked(&song.video_id, liked).await;
+            this.update(cx, |this, cx| {
+                this.cloud_library_operation = CloudLibraryOperation::Idle;
+                match result {
+                    Ok(()) => {
+                        this.cloud_library_error = None;
+                        if previous.is_none() {
+                            this.reload_cloud_library(cx);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(previous) = previous {
+                            this.cloud_library_state = CloudLibraryViewState::Loaded(previous);
+                        }
+                        this.record_cloud_error(error);
+                    }
+                }
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        self.refresh_visible_thumbnails(cx);
+        cx.notify();
+    }
+
+    fn set_cloud_song_in_library(&mut self, song: Song, in_library: bool, cx: &mut Context<Self>) {
+        if self.cloud_busy() || !self.account_ready() || song.is_episode {
+            return;
+        }
+        let previous = match &self.cloud_library_state {
+            CloudLibraryViewState::Loaded(library) => Some(library.clone()),
+            _ => None,
+        };
+        if let CloudLibraryViewState::Loaded(library) = &mut self.cloud_library_state {
+            library.set_video_in_library(song.clone(), in_library);
+        }
+        self.cloud_library_error = None;
+        self.cloud_library_operation = CloudLibraryOperation::SettingSongLibrary;
+        let client = self.search_client.clone();
+        self.cloud_mutation_task = Some(cx.spawn(async move |this, cx| {
+            let result = client.set_song_in_library(&song.video_id, in_library).await;
             this.update(cx, |this, cx| {
                 this.cloud_library_operation = CloudLibraryOperation::Idle;
                 match result {
@@ -3415,6 +4160,9 @@ impl MetrolistShell {
     }
 
     fn open_cloud_playlist_picker(&mut self, song: Song, cx: &mut Context<Self>) {
+        if self.now_playing_visible {
+            self.close_now_playing(cx);
+        }
         if !self.account_ready() {
             self.navigate(Route::Settings, cx);
             return;
@@ -4648,6 +5396,32 @@ impl MetrolistShell {
         profile: Option<EqualizerProfile>,
         cx: &mut Context<Self>,
     ) {
+        let mut equalizer = self.settings.equalizer.clone();
+        equalizer.enabled = profile.is_some();
+        equalizer.active_profile = profile.clone();
+        let success_notice = profile.map_or_else(
+            || "Equalizer disabled and saved.".into(),
+            |profile| format!("Applied and saved {}.", profile.name),
+        );
+        self.request_equalizer_change(equalizer, success_notice, cx);
+    }
+
+    fn request_equalizer_preset_change(&mut self, preset: EqualizerPreset, cx: &mut Context<Self>) {
+        let equalizer = EqualizerSettings::from_preset(preset);
+        let success_notice = if preset == EqualizerPreset::Flat {
+            "Equalizer disabled and saved.".into()
+        } else {
+            format!("Applied and saved the {} preset.", preset.label())
+        };
+        self.request_equalizer_change(equalizer, success_notice, cx);
+    }
+
+    fn request_equalizer_change(
+        &mut self,
+        equalizer: EqualizerSettings,
+        success_notice: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.equalizer_operation != EqualizerOperation::Idle
             || self.settings_operation == SettingsOperation::Applying
             || self.playback_parameters_pending.is_some()
@@ -4655,9 +5429,6 @@ impl MetrolistShell {
             return;
         }
         let previous = self.settings.equalizer.clone();
-        let mut equalizer = previous.clone();
-        equalizer.enabled = profile.is_some();
-        equalizer.active_profile = profile.clone();
         if equalizer == previous {
             return;
         }
@@ -4691,7 +5462,6 @@ impl MetrolistShell {
             }
             Ok::<_, AppError>(equalizer)
         });
-        let selected_name = profile.map(|profile| profile.name);
         self.equalizer_task = Some(cx.spawn(async move |this, cx| {
             let result = operation.await;
             this.update(cx, |this, cx| {
@@ -4701,10 +5471,7 @@ impl MetrolistShell {
                     Ok(equalizer) => {
                         this.settings.equalizer = equalizer.clone();
                         this.settings_draft.equalizer = equalizer;
-                        this.equalizer_notice = Some(selected_name.map_or_else(
-                            || "Equalizer disabled and saved.".into(),
-                            |name| format!("Applied and saved {name}."),
-                        ));
+                        this.equalizer_notice = Some(success_notice);
                         this.equalizer_error = None;
                     }
                     Err(error) => {
@@ -4773,8 +5540,141 @@ impl MetrolistShell {
         cx.notify();
     }
 
+    fn confirm_clear_playback_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.storage_operation != StorageOperation::Idle {
+            return;
+        }
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            dialog
+                .title("Clear playback cache?")
+                .description("Cached streaming audio will be removed. Explicit offline downloads, playlists, favourites, history, and the current queue will be kept.")
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Clear cache")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    weak.update(cx, |this, cx| this.clear_playback_cache(cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    fn clear_playback_cache(&mut self, cx: &mut Context<Self>) {
+        if self.storage_operation != StorageOperation::Idle {
+            return;
+        }
+        self.storage_operation = StorageOperation::ClearingPlaybackCache;
+        self.settings_error = None;
+        self.settings_notice = None;
+        let cache = self.audio_cache.clone();
+        let operation = cx.background_executor().spawn(async move {
+            cache.clear().map_err(|error| {
+                AppError::Storage(format!("playback cache could not be cleared: {error}"))
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            this.update(cx, |this, cx| {
+                this.storage_operation = StorageOperation::Idle;
+                match result {
+                    Ok(()) => {
+                        this.settings_notice = Some("Playback cache cleared.".into());
+                        this.settings_error = None;
+                    }
+                    Err(error) => {
+                        this.settings_error = Some(error.to_string());
+                        this.settings_notice = None;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn confirm_clear_artwork_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.storage_operation != StorageOperation::Idle {
+            return;
+        }
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            dialog
+                .title("Clear artwork cache?")
+                .description("Downloaded artwork cache files will be removed and visible artwork will reload. Local playlist cover source files and music data will be kept.")
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Clear cache")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    weak.update(cx, |this, cx| this.clear_artwork_cache(cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    fn clear_artwork_cache(&mut self, cx: &mut Context<Self>) {
+        if self.storage_operation != StorageOperation::Idle {
+            return;
+        }
+        let Some(cache) = self.thumbnail_cache.clone() else {
+            self.settings_error = Some("The artwork cache is unavailable.".into());
+            self.settings_notice = None;
+            cx.notify();
+            return;
+        };
+        self.storage_operation = StorageOperation::ClearingArtworkCache;
+        self.settings_error = None;
+        self.settings_notice = None;
+        self.thumbnail_tasks.clear();
+        let operation = cx.background_executor().spawn(async move {
+            cache.clear().map_err(|error| {
+                AppError::Storage(format!("artwork cache could not be cleared: {error}"))
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            this.update(cx, |this, cx| {
+                this.storage_operation = StorageOperation::Idle;
+                match result {
+                    Ok(()) => {
+                        for (_, image) in this.thumbnail_images.drain() {
+                            image.remove_asset(cx);
+                        }
+                        this.thumbnail_order.clear();
+                        this.thumbnail_failures.clear();
+                        this.settings_notice = Some("Artwork cache cleared.".into());
+                        this.settings_error = None;
+                        this.refresh_visible_thumbnails(cx);
+                    }
+                    Err(error) => {
+                        this.settings_error = Some(error.to_string());
+                        this.settings_notice = None;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn apply_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_operation == SettingsOperation::Applying
+            || self.storage_operation != StorageOperation::Idle
             || self.playback_parameters_pending.is_some()
             || self.equalizer_operation != EqualizerOperation::Idle
             || self.account_operation != AccountOperation::Idle
@@ -4891,6 +5791,9 @@ impl MetrolistShell {
     ) {
         let quality_changed = self.settings.audio_quality != settings.audio_quality;
         let autoeq_cache_changed = self.settings.cache_root != settings.cache_root;
+        let session_persistence_changed = self.settings.persistent_queue
+            != settings.persistent_queue
+            || self.settings.remember_shuffle_and_repeat != settings.remember_shuffle_and_repeat;
         let before = self.audio_player.snapshot();
         let selected_output = self.audio_player.device_snapshot().selected_id;
         let active_source = self.active_playback_source.clone();
@@ -4905,6 +5808,7 @@ impl MetrolistShell {
         });
 
         self.reset_radio_queue();
+        self.pending_crossfade_duration = None;
         self.search_task = None;
         self.browse_task = None;
         self.home_task = None;
@@ -4927,6 +5831,7 @@ impl MetrolistShell {
             let _ = audio.select_output_device(device_id);
         }
         audio.set_volume(before.volume);
+        audio.set_volume_multiplier(self.sleep_timer_volume_multiplier);
         let mut restored_offline = false;
         if let Some((source, is_offline)) = restorable_source {
             match audio.load(source) {
@@ -4965,6 +5870,12 @@ impl MetrolistShell {
         }
         self.settings = settings.clone();
         self.settings_draft = settings.clone();
+        if !settings.pause_on_mute {
+            self.paused_by_mute = false;
+        }
+        self.history_duration_slider.update(cx, |slider, cx| {
+            slider.set_value(f32::from(settings.history_duration_seconds), window, cx)
+        });
         if autoeq_cache_changed {
             self.autoeq_search_generation = self.autoeq_search_generation.wrapping_add(1);
             self.autoeq_search_task = None;
@@ -5004,7 +5915,9 @@ impl MetrolistShell {
             input.set_value(settings.listen_together.username, window, cx)
         });
 
-        if quality_changed && before.state != PlaybackState::Idle && !restored_offline {
+        let restoring_quality_source =
+            quality_changed && before.state != PlaybackState::Idle && !restored_offline;
+        if restoring_quality_source {
             self.active_playback_source = None;
             self.persisted_playback_source = None;
             self.pending_resume_position = (!before.position.is_zero()).then_some(before.position);
@@ -5013,6 +5926,9 @@ impl MetrolistShell {
             if let Some(song) = self.current_song.clone() {
                 self.resolve_and_play(song, window, cx);
             }
+        }
+        if session_persistence_changed && !restoring_quality_source {
+            self.save_session(cx);
         }
 
         self.home_default_page = None;
@@ -5031,6 +5947,10 @@ impl MetrolistShell {
 
     fn reset_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_draft = self.settings.clone();
+        let history_duration_seconds = self.settings.history_duration_seconds;
+        self.history_duration_slider.update(cx, |slider, cx| {
+            slider.set_value(f32::from(history_duration_seconds), window, cx)
+        });
         self.settings_error = None;
         self.settings_notice = None;
         self.theme_mode = match self.settings.theme {
@@ -5070,19 +5990,23 @@ impl MetrolistShell {
         }
 
         self.lastfm_playback_tracker.reset();
+        self.now_playing_notice = None;
         self.lyrics_task = None;
         self.lyrics_state = LyricsViewState::Idle;
         self.lyrics_active_line = None;
         self.lyrics_scroll = ScrollHandle::new();
+        self.media_info_task = None;
+        self.media_info_state = None;
         if song.is_episode {
             self.lyrics_visible = false;
             if self.now_playing_tab == NowPlayingTab::Lyrics {
                 self.now_playing_tab = NowPlayingTab::UpNext;
             }
-            return;
+        } else if self.lyrics_surface_visible() {
+            self.load_lyrics(song.clone(), false, cx);
         }
-        if self.lyrics_surface_visible() {
-            self.load_lyrics(song, false, cx);
+        if self.now_playing_visible && self.now_playing_tab == NowPlayingTab::Details {
+            self.load_media_info(song, false, cx);
         }
     }
 
@@ -5101,6 +6025,14 @@ impl MetrolistShell {
         self.playback_parameters_visible = false;
         self.playlist_picker_song = None;
         self.cloud_playlist_picker_song = None;
+        self.media_info_panel_visible = false;
+        self.media_info_task = None;
+        self.media_info_state = None;
+        if self.now_playing_tab == NowPlayingTab::Details
+            && let Some(song) = self.current_song.clone()
+        {
+            self.load_media_info(song, false, cx);
+        }
         cx.notify();
     }
 
@@ -5110,6 +6042,134 @@ impl MetrolistShell {
             self.lyrics_task = None;
             self.lyrics_state = LyricsViewState::Idle;
         }
+        if self.now_playing_tab == NowPlayingTab::Details {
+            self.media_info_task = None;
+            self.media_info_state = None;
+        }
+        cx.notify();
+    }
+
+    fn copy_song_link(&mut self, video_id: &str, cx: &mut Context<Self>) {
+        let link = format!("https://music.youtube.com/watch?v={video_id}");
+        cx.write_to_clipboard(ClipboardItem::new_string(link));
+        self.now_playing_notice = Some("YouTube Music link copied.".into());
+        cx.notify();
+    }
+
+    fn refresh_song_metadata(&mut self, video_id: String, cx: &mut Context<Self>) {
+        if self.song_metadata_refreshing.is_some() || self.listen_together_is_guest() {
+            return;
+        }
+        self.song_metadata_refreshing = Some(video_id.clone());
+        self.song_metadata_error = None;
+        self.now_playing_notice = None;
+        let client = self.search_client.clone();
+        self.song_metadata_task = Some(cx.spawn(async move |this, cx| {
+            let result = client.queue_song(&video_id).await;
+            this.update(cx, |this, cx| {
+                if this.song_metadata_refreshing.as_deref() != Some(video_id.as_str()) {
+                    return;
+                }
+                this.song_metadata_refreshing = None;
+                this.song_metadata_task = None;
+                match result {
+                    Ok(song) => {
+                        let mut items = this.queue.items().to_vec();
+                        let mut updated_queue = false;
+                        for item in &mut items {
+                            if item.song.video_id == video_id {
+                                item.song = song.clone();
+                                updated_queue = true;
+                            }
+                        }
+                        if updated_queue {
+                            let current_index = this.queue.current_index();
+                            this.queue.replace(items, current_index);
+                        }
+                        let updated_current = this
+                            .current_song
+                            .as_ref()
+                            .is_some_and(|current| current.video_id == video_id);
+                        if updated_current {
+                            this.set_current_song(song.clone(), cx);
+                        }
+                        if updated_queue || updated_current {
+                            this.save_session(cx);
+                            this.now_playing_notice =
+                                Some(format!("Refreshed details for {}.", song.title));
+                        }
+                    }
+                    Err(error) => {
+                        let message = this.record_cloud_request_failure(&error);
+                        this.song_metadata_error =
+                            Some(format!("Could not refresh song details: {message}"));
+                    }
+                }
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn load_media_info(&mut self, song: Song, force: bool, cx: &mut Context<Self>) {
+        if !force
+            && self
+                .media_info_state
+                .as_ref()
+                .is_some_and(|state| state.matches(&song.video_id))
+        {
+            return;
+        }
+        let video_id = song.video_id.clone();
+        self.media_info_task = None;
+        self.media_info_state = Some(MediaInfoViewState::Loading(song.clone()));
+        let client = self.search_client.clone();
+        self.media_info_task = Some(cx.spawn(async move |this, cx| {
+            let result = client.media_info(&video_id).await;
+            this.update(cx, |this, cx| {
+                if !this
+                    .media_info_state
+                    .as_ref()
+                    .is_some_and(|state| state.matches(&video_id))
+                {
+                    return;
+                }
+                this.media_info_task = None;
+                this.media_info_state = Some(match result {
+                    Ok(info) => MediaInfoViewState::Loaded(song, info),
+                    Err(error) => MediaInfoViewState::Failed(song, error.to_string()),
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn open_media_info_panel(&mut self, song: Song, cx: &mut Context<Self>) {
+        self.now_playing_visible = false;
+        self.queue_visible = false;
+        self.lyrics_visible = false;
+        self.playback_parameters_visible = false;
+        self.playlist_picker_song = None;
+        self.cloud_playlist_picker_song = None;
+        self.media_info_panel_visible = true;
+        self.load_media_info(song, false, cx);
+        cx.notify();
+    }
+
+    fn close_media_info_panel(&mut self, cx: &mut Context<Self>) {
+        self.media_info_panel_visible = false;
+        self.media_info_task = None;
+        self.media_info_state = None;
+        cx.notify();
+    }
+
+    fn copy_detail_value(&mut self, label: &'static str, value: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.now_playing_notice = Some(format!("Copied {label}."));
         cx.notify();
     }
 
@@ -5122,6 +6182,10 @@ impl MetrolistShell {
             self.lyrics_task = None;
             self.lyrics_state = LyricsViewState::Idle;
         }
+        if self.now_playing_tab == NowPlayingTab::Details && next_tab != NowPlayingTab::Details {
+            self.media_info_task = None;
+            self.media_info_state = None;
+        }
         self.now_playing_tab = next_tab;
         if self.now_playing_tab == NowPlayingTab::Lyrics
             && let Some(song) = self.current_song.clone()
@@ -5129,6 +6193,11 @@ impl MetrolistShell {
             && !lyrics_state_matches_song(&self.lyrics_state, &song.video_id)
         {
             self.load_lyrics(song, false, cx);
+        }
+        if self.now_playing_tab == NowPlayingTab::Details
+            && let Some(song) = self.current_song.clone()
+        {
+            self.load_media_info(song, false, cx);
         }
         self.update_lyrics_timeline();
         cx.notify();
@@ -5329,7 +6398,7 @@ impl MetrolistShell {
 
     fn save_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         let query = query.trim().to_owned();
-        if query.is_empty() {
+        if query.is_empty() || self.settings.pause_search_history {
             return;
         }
         let store = self.store.clone();
@@ -5408,14 +6477,31 @@ impl MetrolistShell {
             return;
         }
         self.search_history_error = None;
+        if matches!(self.model.route(), Route::Settings) {
+            self.settings_error = None;
+            self.settings_notice = None;
+        }
         let store = self.store.clone();
         self.search_history_task = Some(cx.spawn(async move |this, cx| {
             let result = store.clear_search_history().await;
             this.update(cx, |this, cx| {
                 this.search_history_task = None;
                 match result {
-                    Ok(()) => this.search_history_state = StoredViewState::Loaded(Vec::new()),
-                    Err(error) => this.search_history_error = Some(error.to_string()),
+                    Ok(()) => {
+                        this.search_history_state = StoredViewState::Loaded(Vec::new());
+                        if matches!(this.model.route(), Route::Settings) {
+                            this.settings_notice = Some("Search history cleared.".into());
+                            this.settings_error = None;
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        this.search_history_error = Some(message.clone());
+                        if matches!(this.model.route(), Route::Settings) {
+                            this.settings_error = Some(message);
+                            this.settings_notice = None;
+                        }
+                    }
                 }
                 cx.notify();
             })
@@ -5438,9 +6524,7 @@ impl MetrolistShell {
             let weak = weak.clone();
             dialog
                 .title("Clear search history?")
-                .description(format!(
-                    "All {entry_count} saved search queries will be removed from this device."
-                ))
+                .description("All saved search queries will be removed from this device.")
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Clear history")
@@ -5704,7 +6788,7 @@ impl MetrolistShell {
 
     fn play_search_suggestion(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_search_suggestions();
-        self.play_song_collection(vec![song], 0, window, cx);
+        self.play_discovery_song(song, window, cx);
         self.refresh_visible_thumbnails(cx);
         cx.notify();
     }
@@ -5767,14 +6851,19 @@ impl MetrolistShell {
     fn open_online_browse(&mut self, item: BrowseItem, cx: &mut Context<Self>) {
         if self.model.route() != Route::Search {
             self.browse_return_route = self.model.route();
+            self.browse_back_stack.clear();
             self.model.navigate(Route::Search);
         } else if self.browse_state.is_none() {
             self.browse_return_route = Route::Search;
+            self.browse_back_stack.clear();
+        } else if let Some(BrowseViewState::Loaded(page)) = &self.browse_state {
+            self.browse_back_stack.push(page.clone());
         }
         self.browse_state = Some(BrowseViewState::Loading(item.clone()));
         self.browse_loading_more = false;
         self.browse_load_more_error = None;
         self.browse_seen_continuations.clear();
+        self.browse_collection_action_error = None;
         self.refresh_visible_thumbnails(cx);
         let client = self.search_client.clone();
         self.browse_task = Some(cx.spawn(async move |this, cx| {
@@ -5800,11 +6889,16 @@ impl MetrolistShell {
 
     fn close_online_browse(&mut self, cx: &mut Context<Self>) {
         self.browse_task = None;
-        self.browse_state = None;
         self.browse_loading_more = false;
         self.browse_load_more_error = None;
         self.browse_seen_continuations.clear();
-        self.model.navigate(self.browse_return_route);
+        self.browse_collection_action_error = None;
+        if let Some(page) = self.browse_back_stack.pop() {
+            self.browse_state = Some(BrowseViewState::Loaded(page));
+        } else {
+            self.browse_state = None;
+            self.model.navigate(self.browse_return_route);
+        }
         self.refresh_visible_thumbnails(cx);
         cx.notify();
     }
@@ -6227,6 +7321,21 @@ impl MetrolistShell {
             }
         }
         if self.model.route() == Route::Home {
+            if let StoredViewState::Loaded(songs) = &self.speed_dial_state {
+                for song in songs {
+                    collect_thumbnail_url(song.thumbnail_url.as_deref(), &mut urls);
+                }
+            }
+            if let StoredViewState::Loaded(items) = &self.speed_dial_browse_state {
+                for item in items {
+                    collect_thumbnail_url(item.thumbnail_url.as_deref(), &mut urls);
+                }
+            }
+            if let StoredViewState::Loaded(playlists) = &self.speed_dial_local_playlists_state {
+                for playlist in playlists {
+                    collect_local_playlist_thumbnail_urls(playlist, &mut urls);
+                }
+            }
             for song in self.home_quick_picks() {
                 collect_thumbnail_url(song.thumbnail_url.as_deref(), &mut urls);
             }
@@ -6307,6 +7416,31 @@ impl MetrolistShell {
             }
         }
         if self.model.route() == Route::Library {
+            if let StoredViewState::Loaded(playlists) = &self.playlists_state {
+                for playlist in playlists {
+                    collect_local_playlist_thumbnail_urls(playlist, &mut urls);
+                }
+            }
+            if let Some(detail) = &self.playlist_detail {
+                match detail {
+                    PlaylistDetailState::Loaded(playlist, songs)
+                        if playlist.thumbnail_url.is_none() =>
+                    {
+                        for song in songs
+                            .iter()
+                            .filter(|song| song.thumbnail_url.is_some())
+                            .take(4)
+                        {
+                            collect_thumbnail_url(song.thumbnail_url.as_deref(), &mut urls);
+                        }
+                    }
+                    PlaylistDetailState::Loading(playlist)
+                    | PlaylistDetailState::Loaded(playlist, _)
+                    | PlaylistDetailState::Failed(playlist, _) => {
+                        collect_local_playlist_thumbnail_urls(playlist, &mut urls);
+                    }
+                }
+            }
             if let StoredViewState::Loaded(podcasts) = &self.podcast_subscriptions {
                 for podcast in podcasts {
                     collect_thumbnail_url(podcast.thumbnail_url.as_deref(), &mut urls);
@@ -6337,6 +7471,11 @@ impl MetrolistShell {
             if self.search_source == SearchSource::Local {
                 for song in self.local_search_songs() {
                     collect_thumbnail_url(song.thumbnail_url.as_deref(), &mut urls);
+                }
+                if let StoredViewState::Loaded(playlists) = &self.playlists_state {
+                    for playlist in playlists {
+                        collect_local_playlist_thumbnail_urls(playlist, &mut urls);
+                    }
                 }
             } else {
                 match &self.browse_state {
@@ -6714,6 +7853,9 @@ impl MetrolistShell {
         }
         let favorite = !self.is_favorite(&song.video_id);
         let lastfm_song = song.clone();
+        let auto_download_song =
+            (favorite && self.settings.auto_download_on_like && !song.is_episode)
+                .then(|| song.clone());
         let store = self.store.clone();
         self.library_error = None;
         cx.spawn(async move |this, cx| {
@@ -6727,6 +7869,9 @@ impl MetrolistShell {
                     Ok(favorites) => {
                         this.favorites_state = StoredViewState::Loaded(favorites);
                         this.sync_lastfm_love(lastfm_song, favorite, cx);
+                        if let Some(song) = auto_download_song {
+                            this.queue_song_download(song, cx);
+                        }
                         this.reload_daily_discover(cx);
                     }
                     Err(error) => {
@@ -6738,6 +7883,205 @@ impl MetrolistShell {
             .ok();
         })
         .detach();
+    }
+
+    fn is_speed_dial_song(&self, video_id: &str) -> bool {
+        matches!(
+            &self.speed_dial_state,
+            StoredViewState::Loaded(songs)
+                if songs.iter().any(|song| song.video_id == video_id)
+        )
+    }
+
+    fn is_speed_dial_browse_item(&self, item: &BrowseItem) -> bool {
+        matches!(
+            &self.speed_dial_browse_state,
+            StoredViewState::Loaded(items)
+                if items.iter().any(|pinned| {
+                    pinned.browse_id == item.browse_id && pinned.kind == item.kind
+                })
+        )
+    }
+
+    fn is_speed_dial_local_playlist(&self, playlist_id: i64) -> bool {
+        matches!(
+            &self.speed_dial_local_playlists_state,
+            StoredViewState::Loaded(playlists)
+                if playlists.iter().any(|playlist| playlist.id == playlist_id)
+        )
+    }
+
+    fn reload_speed_dial(&mut self, cx: &mut Context<Self>) {
+        if self.speed_dial_busy.is_some() {
+            return;
+        }
+        self.speed_dial_busy = Some(String::new());
+        self.speed_dial_error = None;
+        self.speed_dial_state = StoredViewState::Loading;
+        self.speed_dial_browse_state = StoredViewState::Loading;
+        self.speed_dial_local_playlists_state = StoredViewState::Loading;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let (songs, items, playlists) = futures::join!(
+                store.speed_dial_songs(),
+                store.speed_dial_browse_items(),
+                store.speed_dial_local_playlists()
+            );
+            this.update(cx, |this, cx| {
+                this.speed_dial_busy = None;
+                this.speed_dial_state = match songs {
+                    Ok(songs) => StoredViewState::Loaded(songs),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.speed_dial_browse_state = match items {
+                    Ok(items) => StoredViewState::Loaded(items),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.speed_dial_local_playlists_state = match playlists {
+                    Ok(playlists) => StoredViewState::Loaded(playlists),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toggle_speed_dial_song(&mut self, song: Song, cx: &mut Context<Self>) {
+        if song.is_episode
+            || self.speed_dial_busy.is_some()
+            || !matches!(&self.speed_dial_state, StoredViewState::Loaded(_))
+        {
+            return;
+        }
+        let pinned = !self.is_speed_dial_song(&song.video_id);
+        let video_id = song.video_id.clone();
+        let title = song.title.clone();
+        self.speed_dial_busy = Some(video_id.clone());
+        self.speed_dial_error = None;
+        self.speed_dial_notice = None;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                store.set_speed_dial_song(song, pinned).await?;
+                store.speed_dial_songs().await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.speed_dial_busy = None;
+                match result {
+                    Ok(songs) => {
+                        this.speed_dial_state = StoredViewState::Loaded(songs);
+                        this.speed_dial_notice = Some(if pinned {
+                            format!("Pinned {title} to Speed Dial.")
+                        } else {
+                            format!("Removed {title} from Speed Dial.")
+                        });
+                    }
+                    Err(error) => this.speed_dial_error = Some(error.to_string()),
+                }
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toggle_speed_dial_browse_item(&mut self, item: BrowseItem, cx: &mut Context<Self>) {
+        if item.kind == BrowseKind::Category
+            || self.speed_dial_busy.is_some()
+            || !matches!(&self.speed_dial_browse_state, StoredViewState::Loaded(_))
+        {
+            return;
+        }
+        let pinned = !self.is_speed_dial_browse_item(&item);
+        let busy_key = format!("browse:{}:{}", item.kind.label(), item.browse_id);
+        let title = item.title.clone();
+        self.speed_dial_busy = Some(busy_key);
+        self.speed_dial_error = None;
+        self.speed_dial_notice = None;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                store.set_speed_dial_browse_item(item, pinned).await?;
+                store.speed_dial_browse_items().await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.speed_dial_busy = None;
+                match result {
+                    Ok(items) => {
+                        this.speed_dial_browse_state = StoredViewState::Loaded(items);
+                        this.speed_dial_notice = Some(if pinned {
+                            format!("Pinned {title} to Speed Dial.")
+                        } else {
+                            format!("Removed {title} from Speed Dial.")
+                        });
+                    }
+                    Err(error) => this.speed_dial_error = Some(error.to_string()),
+                }
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toggle_speed_dial_local_playlist(
+        &mut self,
+        playlist: LocalPlaylist,
+        cx: &mut Context<Self>,
+    ) {
+        if self.speed_dial_busy.is_some()
+            || !matches!(
+                &self.speed_dial_local_playlists_state,
+                StoredViewState::Loaded(_)
+            )
+        {
+            return;
+        }
+        let pinned = !self.is_speed_dial_local_playlist(playlist.id);
+        let busy_key = format!("local-playlist:{}", playlist.id);
+        let title = playlist.name.clone();
+        let playlist_id = playlist.id;
+        self.speed_dial_busy = Some(busy_key);
+        self.speed_dial_error = None;
+        self.speed_dial_notice = None;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                store
+                    .set_speed_dial_local_playlist(playlist_id, pinned)
+                    .await?;
+                store.speed_dial_local_playlists().await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.speed_dial_busy = None;
+                match result {
+                    Ok(playlists) => {
+                        this.speed_dial_local_playlists_state = StoredViewState::Loaded(playlists);
+                        this.speed_dial_notice = Some(if pinned {
+                            format!("Pinned {title} to Speed Dial.")
+                        } else {
+                            format!("Removed {title} from Speed Dial.")
+                        });
+                    }
+                    Err(error) => this.speed_dial_error = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     fn sync_lastfm_love(&mut self, song: Song, loved: bool, cx: &mut Context<Self>) {
@@ -6977,6 +8321,7 @@ impl MetrolistShell {
                 match playlists {
                     Ok(playlists) => {
                         this.playlists_state = StoredViewState::Loaded(playlists);
+                        this.library_mix_create_visible = false;
                     }
                     Err(error) => {
                         this.library_error = Some(error.to_string());
@@ -7045,16 +8390,39 @@ impl MetrolistShell {
         cx.notify();
     }
 
-    fn open_playlist(&mut self, playlist: LocalPlaylist, cx: &mut Context<Self>) {
+    fn open_playlist(
+        &mut self,
+        playlist: LocalPlaylist,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.library_error = None;
+        self.download_error = None;
+        self.playlist_detail_query.clear();
+        self.playlist_song_metadata.clear();
+        self.playlist_selection_mode = false;
+        self.playlist_selected_song_ids.clear();
+        self.playlist_export_notice = None;
+        self.playlist_cover_notice = None;
+        self.playlist_detail_search_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
         self.playlist_detail = Some(PlaylistDetailState::Loading(playlist.clone()));
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
-            let result = store.playlist_songs(playlist.id).await;
+            let result = futures::join!(
+                store.playlist_songs(playlist.id),
+                store.playlist_song_metadata(playlist.id)
+            );
             this.update(cx, |this, cx| {
                 this.playlist_detail = Some(match result {
-                    Ok(songs) => PlaylistDetailState::Loaded(playlist, songs),
-                    Err(error) => PlaylistDetailState::Failed(playlist, error.to_string()),
+                    (Ok(songs), Ok(metadata)) => {
+                        this.playlist_song_metadata = metadata;
+                        PlaylistDetailState::Loaded(playlist, songs)
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        PlaylistDetailState::Failed(playlist, error.to_string())
+                    }
                 });
                 cx.notify();
             })
@@ -7065,6 +8433,16 @@ impl MetrolistShell {
     }
 
     fn open_playlist_picker(&mut self, song: Song, cx: &mut Context<Self>) {
+        self.open_playlist_picker_songs(vec![song], cx);
+    }
+
+    fn open_playlist_picker_songs(&mut self, songs: Vec<Song>, cx: &mut Context<Self>) {
+        if songs.is_empty() {
+            return;
+        }
+        if self.now_playing_visible {
+            self.close_now_playing(cx);
+        }
         if matches!(&self.playlists_state, StoredViewState::Loaded(playlists) if playlists.is_empty())
         {
             self.model.navigate(Route::Library);
@@ -7078,12 +8456,31 @@ impl MetrolistShell {
                 self.lyrics_state = LyricsViewState::Idle;
             }
             self.lyrics_task = None;
-            self.playlist_picker_song = Some(song);
+            self.playlist_picker_song = Some(songs);
         }
         cx.notify();
     }
 
-    fn add_song_to_playlist(&mut self, playlist_id: i64, song: Song, cx: &mut Context<Self>) {
+    fn replace_local_playlist_list(&mut self, playlists: Vec<LocalPlaylist>) {
+        if let StoredViewState::Loaded(pinned) = &mut self.speed_dial_local_playlists_state {
+            for pinned_playlist in pinned {
+                if let Some(updated) = playlists
+                    .iter()
+                    .find(|playlist| playlist.id == pinned_playlist.id)
+                {
+                    *pinned_playlist = updated.clone();
+                }
+            }
+        }
+        self.playlists_state = StoredViewState::Loaded(playlists);
+    }
+
+    fn add_songs_to_playlist(
+        &mut self,
+        playlist_id: i64,
+        songs: Vec<Song>,
+        cx: &mut Context<Self>,
+    ) {
         if self.library_busy() {
             return;
         }
@@ -7094,7 +8491,7 @@ impl MetrolistShell {
         let sort = self.playlist_sort;
         let direction = self.playlist_sort_direction;
         cx.spawn(async move |this, cx| {
-            let result = store.add_to_playlist(playlist_id, song).await;
+            let result = store.add_many_to_playlist(playlist_id, songs).await;
             let playlists = match result {
                 Ok(()) => store.playlists_sorted(sort, direction).await,
                 Err(error) => Err(error),
@@ -7103,7 +8500,8 @@ impl MetrolistShell {
                 this.library_operation = LibraryOperation::Idle;
                 match playlists {
                     Ok(playlists) => {
-                        this.playlists_state = StoredViewState::Loaded(playlists);
+                        this.replace_local_playlist_list(playlists);
+                        this.refresh_visible_thumbnails(cx);
                     }
                     Err(error) => this.library_error = Some(error.to_string()),
                 }
@@ -7130,6 +8528,129 @@ impl MetrolistShell {
         let direction = self.playlist_sort_direction;
         cx.spawn(async move |this, cx| {
             let result = store.remove_from_playlist(playlist.id, song.video_id).await;
+            let (songs, metadata, playlists) = match result {
+                Ok(()) => futures::join!(
+                    store.playlist_songs(playlist.id),
+                    store.playlist_song_metadata(playlist.id),
+                    store.playlists_sorted(sort, direction)
+                ),
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.library_operation = LibraryOperation::Idle;
+                        this.library_error = Some(error.to_string());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.library_operation = LibraryOperation::Idle;
+                match (songs, metadata) {
+                    (Ok(songs), Ok(metadata)) => {
+                        let mut playlist = playlist;
+                        playlist.song_count = songs.len();
+                        this.playlist_song_metadata = metadata;
+                        this.playlist_detail = Some(PlaylistDetailState::Loaded(playlist, songs));
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        let message = error.to_string();
+                        this.library_error = Some(message.clone());
+                        this.playlist_detail = Some(PlaylistDetailState::Failed(playlist, message));
+                    }
+                }
+                if let Ok(playlists) = playlists {
+                    this.replace_local_playlist_list(playlists);
+                    this.refresh_visible_thumbnails(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn remove_many_from_playlist(
+        &mut self,
+        playlist: LocalPlaylist,
+        video_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.library_busy() || video_ids.is_empty() {
+            return;
+        }
+        self.library_error = None;
+        self.library_operation = LibraryOperation::RemovingFromPlaylist;
+        let store = self.store.clone();
+        let sort = self.playlist_sort;
+        let direction = self.playlist_sort_direction;
+        cx.spawn(async move |this, cx| {
+            let result = store
+                .remove_many_from_playlist(playlist.id, video_ids)
+                .await;
+            let (songs, metadata, playlists) = match result {
+                Ok(()) => futures::join!(
+                    store.playlist_songs(playlist.id),
+                    store.playlist_song_metadata(playlist.id),
+                    store.playlists_sorted(sort, direction)
+                ),
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.library_operation = LibraryOperation::Idle;
+                        this.library_error = Some(error.to_string());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.library_operation = LibraryOperation::Idle;
+                this.playlist_selection_mode = false;
+                this.playlist_selected_song_ids.clear();
+                match (songs, metadata) {
+                    (Ok(songs), Ok(metadata)) => {
+                        let mut playlist = playlist;
+                        playlist.song_count = songs.len();
+                        this.playlist_song_metadata = metadata;
+                        this.playlist_detail = Some(PlaylistDetailState::Loaded(playlist, songs));
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        let message = error.to_string();
+                        this.library_error = Some(message.clone());
+                        this.playlist_detail = Some(PlaylistDetailState::Failed(playlist, message));
+                    }
+                }
+                if let Ok(playlists) = playlists {
+                    this.replace_local_playlist_list(playlists);
+                    this.refresh_visible_thumbnails(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn move_local_playlist_song(
+        &mut self,
+        playlist: LocalPlaylist,
+        video_id: String,
+        move_up: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.library_busy() {
+            return;
+        }
+        self.library_error = None;
+        self.library_operation = LibraryOperation::ReorderingPlaylist;
+        let store = self.store.clone();
+        let sort = self.playlist_sort;
+        let direction = self.playlist_sort_direction;
+        cx.spawn(async move |this, cx| {
+            let result = store
+                .move_playlist_song(playlist.id, video_id, move_up)
+                .await;
             let (songs, playlists) = match result {
                 Ok(()) => futures::join!(
                     store.playlist_songs(playlist.id),
@@ -7149,20 +8670,238 @@ impl MetrolistShell {
                 this.library_operation = LibraryOperation::Idle;
                 match songs {
                     Ok(songs) => {
-                        let mut playlist = playlist;
-                        playlist.song_count = songs.len();
-                        this.playlist_detail = Some(PlaylistDetailState::Loaded(playlist, songs));
+                        this.playlist_detail =
+                            Some(PlaylistDetailState::Loaded(playlist.clone(), songs));
                     }
-                    Err(error) => this.library_error = Some(error.to_string()),
+                    Err(error) => {
+                        let message = error.to_string();
+                        this.library_error = Some(message.clone());
+                        this.playlist_detail =
+                            Some(PlaylistDetailState::Failed(playlist.clone(), message));
+                    }
                 }
-                if let Ok(playlists) = playlists {
-                    this.playlists_state = StoredViewState::Loaded(playlists);
+                match playlists {
+                    Ok(playlists) => {
+                        this.replace_local_playlist_list(playlists);
+                        this.refresh_visible_thumbnails(cx);
+                    }
+                    Err(error) if this.library_error.is_none() => {
+                        this.library_error = Some(error.to_string());
+                    }
+                    Err(_) => {}
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    fn export_local_playlist(
+        &mut self,
+        playlist: LocalPlaylist,
+        songs: Vec<Song>,
+        format: PlaylistExportFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.playlist_exporting || songs.is_empty() {
+            return;
+        }
+        let content = match format {
+            PlaylistExportFormat::Csv => local_playlist_csv(&songs),
+            PlaylistExportFormat::M3u => local_playlist_m3u(&songs),
+        };
+        let suggested_name = playlist_export_filename(&playlist.name, format.extension());
+        let directory = dirs::download_dir()
+            .or_else(dirs::document_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        self.playlist_exporting = true;
+        self.playlist_export_notice = None;
+        self.library_error = None;
+        let playlist_id = playlist.id;
+        let operation = cx.background_executor().spawn(async move {
+            let selected = picker
+                .await
+                .map_err(|error| {
+                    AppError::Storage(format!("playlist export picker closed: {error}"))
+                })?
+                .map_err(|error| {
+                    AppError::Storage(format!(
+                        "playlist export picker could not be opened: {error}"
+                    ))
+                })?;
+            let Some(path) = selected else {
+                return Ok::<_, AppError>(None);
+            };
+            std::fs::write(&path, content).map_err(|error| {
+                AppError::Storage(format!(
+                    "could not export playlist to '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            Ok(Some(path))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = operation.await;
+            this.update_in(cx, |this, _, cx| {
+                this.playlist_exporting = false;
+                let current_matches = matches!(
+                    &this.playlist_detail,
+                    Some(PlaylistDetailState::Loading(current))
+                        | Some(PlaylistDetailState::Loaded(current, _))
+                        | Some(PlaylistDetailState::Failed(current, _))
+                        if current.id == playlist_id
+                );
+                if current_matches {
+                    match result {
+                        Ok(Some(path)) => {
+                            this.playlist_export_notice =
+                                Some(format!("{} exported to {}", format.label(), path.display()));
+                        }
+                        Ok(None) => {}
+                        Err(error) => this.library_error = Some(error.to_string()),
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_local_playlist_update(
+        &mut self,
+        updated: LocalPlaylist,
+        playlists: Vec<LocalPlaylist>,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_local_playlist_list(playlists);
+        self.playlist_detail = self.playlist_detail.take().map(|detail| match detail {
+            PlaylistDetailState::Loading(current) if current.id == updated.id => {
+                PlaylistDetailState::Loading(updated.clone())
+            }
+            PlaylistDetailState::Loaded(current, songs) if current.id == updated.id => {
+                PlaylistDetailState::Loaded(updated.clone(), songs)
+            }
+            PlaylistDetailState::Failed(current, error) if current.id == updated.id => {
+                PlaylistDetailState::Failed(updated.clone(), error)
+            }
+            detail => detail,
+        });
+        self.refresh_visible_thumbnails(cx);
+    }
+
+    fn choose_local_playlist_cover(
+        &mut self,
+        playlist: LocalPlaylist,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.library_busy() {
+            return;
+        }
+        let Some(thumbnails) = self.thumbnail_cache.clone() else {
+            self.library_error = Some("The thumbnail loader is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a playlist cover image".into()),
+        });
+        self.library_operation = LibraryOperation::UpdatingPlaylistCover;
+        self.library_error = None;
+        self.playlist_cover_notice = None;
+        let store = self.store.clone();
+        let sort = self.playlist_sort;
+        let direction = self.playlist_sort_direction;
+        let playlist_id = playlist.id;
+        let operation = cx.background_executor().spawn(async move {
+            let selected = picker
+                .await
+                .map_err(|error| {
+                    AppError::Storage(format!("playlist cover picker closed: {error}"))
+                })?
+                .map_err(|error| {
+                    AppError::Storage(format!(
+                        "playlist cover picker could not be opened: {error}"
+                    ))
+                })?;
+            let Some(path) = selected.and_then(|paths| paths.into_iter().next()) else {
+                return Ok::<_, AppError>(None);
+            };
+            let thumbnail_url = Url::from_file_path(&path).map_err(|_| {
+                AppError::Storage(format!(
+                    "could not use '{}' as a playlist cover",
+                    path.display()
+                ))
+            })?;
+            thumbnails.load(thumbnail_url.as_str()).await?;
+            let updated = store
+                .set_playlist_thumbnail(playlist_id, Some(thumbnail_url.to_string()))
+                .await?;
+            let playlists = store.playlists_sorted(sort, direction).await?;
+            Ok(Some((updated, playlists)))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = operation.await;
+            this.update_in(cx, |this, _, cx| {
+                this.library_operation = LibraryOperation::Idle;
+                match result {
+                    Ok(Some((updated, playlists))) => {
+                        this.apply_local_playlist_update(updated, playlists, cx);
+                        this.playlist_cover_notice = Some("Playlist cover updated.".into());
+                    }
+                    Ok(None) => {}
+                    Err(error) => this.library_error = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn remove_local_playlist_cover(&mut self, playlist: LocalPlaylist, cx: &mut Context<Self>) {
+        if self.library_busy() || playlist.thumbnail_url.is_none() {
+            return;
+        }
+        self.library_operation = LibraryOperation::UpdatingPlaylistCover;
+        self.library_error = None;
+        self.playlist_cover_notice = None;
+        let store = self.store.clone();
+        let sort = self.playlist_sort;
+        let direction = self.playlist_sort_direction;
+        cx.spawn(async move |this, cx| {
+            let result = match store.set_playlist_thumbnail(playlist.id, None).await {
+                Ok(updated) => store
+                    .playlists_sorted(sort, direction)
+                    .await
+                    .map(|playlists| (updated, playlists)),
+                Err(error) => Err(error),
+            };
+            this.update(cx, |this, cx| {
+                this.library_operation = LibraryOperation::Idle;
+                match result {
+                    Ok((updated, playlists)) => {
+                        this.apply_local_playlist_update(updated, playlists, cx);
+                        this.playlist_cover_notice = Some("Playlist cover removed.".into());
+                    }
+                    Err(error) => this.library_error = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     fn open_rename_playlist_dialog(
@@ -7232,6 +8971,13 @@ impl MetrolistShell {
                 match result {
                     Ok((renamed, playlists)) => {
                         this.playlists_state = StoredViewState::Loaded(playlists);
+                        if let StoredViewState::Loaded(pinned) =
+                            &mut this.speed_dial_local_playlists_state
+                            && let Some(playlist) =
+                                pinned.iter_mut().find(|playlist| playlist.id == renamed.id)
+                        {
+                            *playlist = renamed.clone();
+                        }
                         this.playlist_detail =
                             this.playlist_detail.take().map(|detail| match detail {
                                 PlaylistDetailState::Loading(_) => {
@@ -7241,7 +8987,7 @@ impl MetrolistShell {
                                     PlaylistDetailState::Loaded(renamed.clone(), songs)
                                 }
                                 PlaylistDetailState::Failed(_, error) => {
-                                    PlaylistDetailState::Failed(renamed, error)
+                                    PlaylistDetailState::Failed(renamed.clone(), error)
                                 }
                             });
                     }
@@ -7311,7 +9057,15 @@ impl MetrolistShell {
                 match playlists {
                     Ok(playlists) => {
                         this.playlist_detail = None;
+                        this.playlist_song_metadata.clear();
+                        this.playlist_selection_mode = false;
+                        this.playlist_selected_song_ids.clear();
                         this.playlists_state = StoredViewState::Loaded(playlists);
+                        if let StoredViewState::Loaded(pinned) =
+                            &mut this.speed_dial_local_playlists_state
+                        {
+                            pinned.retain(|playlist| playlist.id != playlist_id);
+                        }
                     }
                     Err(error) => this.library_error = Some(error.to_string()),
                 }
@@ -7337,9 +9091,7 @@ impl MetrolistShell {
             let weak = weak.clone();
             dialog
                 .title("Clear listening history?")
-                .description(format!(
-                    "All {entry_count} listening history entries will be removed from this device. Favourites and playlists will be kept."
-                ))
+                .description("All listening history entries will be removed from this device. Favourites and playlists will be kept.")
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Clear history")
@@ -7359,6 +9111,10 @@ impl MetrolistShell {
             return;
         }
         self.library_error = None;
+        if matches!(self.model.route(), Route::Settings) {
+            self.settings_error = None;
+            self.settings_notice = None;
+        }
         self.library_operation = LibraryOperation::ClearingHistory;
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
@@ -7371,8 +9127,19 @@ impl MetrolistShell {
                         this.keep_listening_state = StoredViewState::Loaded(Vec::new());
                         this.forgotten_favorites_state = StoredViewState::Loaded(Vec::new());
                         this.stats_state = StoredViewState::Loading;
+                        if matches!(this.model.route(), Route::Settings) {
+                            this.settings_notice = Some("Listening history cleared.".into());
+                            this.settings_error = None;
+                        }
                     }
-                    Err(error) => this.library_error = Some(error.to_string()),
+                    Err(error) => {
+                        let message = error.to_string();
+                        this.library_error = Some(message.clone());
+                        if matches!(this.model.route(), Route::Settings) {
+                            this.settings_error = Some(message);
+                            this.settings_notice = None;
+                        }
+                    }
                 }
                 cx.notify();
             })
@@ -7446,14 +9213,28 @@ impl MetrolistShell {
             shuffle_enabled,
             playback_source,
         } = session;
-        self.repeat_mode = repeat_mode;
-        self.shuffle_enabled = shuffle_enabled;
+        if self.settings.remember_shuffle_and_repeat {
+            self.repeat_mode = repeat_mode;
+            self.shuffle_enabled = shuffle_enabled;
+        } else {
+            self.repeat_mode = RepeatMode::Off;
+            self.shuffle_enabled = false;
+        }
         self.audio_player.set_volume(volume);
+        if !self.settings.persistent_queue {
+            self.queue.replace(Vec::new(), None);
+            self.shuffle_primary_len = 0;
+            self.current_song = None;
+            self.pending_resume_position = None;
+            self.persisted_playback_source = None;
+            return;
+        }
         let items = queue.into_iter().map(|song| QueueItem { song }).collect();
         let current = self
             .queue
             .replace(items, current_index)
             .map(|item| item.song.clone());
+        self.shuffle_primary_len = self.queue.len();
         if let Some(song) = current {
             self.set_current_song(song, cx);
         } else {
@@ -7504,7 +9285,17 @@ impl MetrolistShell {
     fn save_session(&mut self, cx: &mut Context<Self>) {
         self.last_session_save = Instant::now();
         let store = self.store.clone();
-        let session = self.persisted_session();
+        let mut session = self.persisted_session();
+        if !self.settings.persistent_queue {
+            session.queue.clear();
+            session.current_index = None;
+            session.position = Duration::ZERO;
+            session.playback_source = None;
+        }
+        if !self.settings.remember_shuffle_and_repeat {
+            session.repeat_mode = RepeatMode::Off;
+            session.shuffle_enabled = false;
+        }
         cx.spawn(async move |_, _| {
             if let Err(error) = store.save_session(session).await {
                 tracing::warn!(%error, "playback session save failed");
@@ -7521,6 +9312,7 @@ impl MetrolistShell {
         let play_time = self.played_this_track;
         let store = self.store.clone();
         let client = self.search_client.clone();
+        let record_local = !self.settings.pause_listening_history;
         let sync_remote = self.settings.youtube_history_sync && self.account_ready();
         let playback_tracking = self
             .active_playback_source
@@ -7530,12 +9322,16 @@ impl MetrolistShell {
         let video_id = song.video_id.clone();
         cx.spawn(async move |this, cx| {
             let local_snapshot = async {
-                store.record_history(song, play_time).await?;
-                Ok::<_, AppError>(futures::join!(
-                    store.recent_history(100),
-                    store.keep_listening(15, 5),
-                    store.forgotten_favorites(20),
-                ))
+                if record_local {
+                    store.record_history(song, play_time).await?;
+                    Ok::<_, AppError>(Some(futures::join!(
+                        store.recent_history(100),
+                        store.keep_listening(15, 5),
+                        store.forgotten_favorites(20),
+                    )))
+                } else {
+                    Ok(None)
+                }
             };
             let remote_registration = async {
                 if !sync_remote {
@@ -7557,7 +9353,7 @@ impl MetrolistShell {
             let (snapshot, remote_result) = futures::join!(local_snapshot, remote_registration);
             this.update(cx, |this, cx| {
                 match snapshot {
-                    Ok((history, keep_listening, forgotten_favorites)) => {
+                    Ok(Some((history, keep_listening, forgotten_favorites))) => {
                         this.history_state = match history {
                             Ok(history) => HistoryViewState::Loaded(history),
                             Err(error) => HistoryViewState::Failed(error.to_string()),
@@ -7571,6 +9367,7 @@ impl MetrolistShell {
                             Err(error) => StoredViewState::Failed(error.to_string()),
                         };
                     }
+                    Ok(None) => {}
                     Err(error) => {
                         let message = error.to_string();
                         this.history_state = HistoryViewState::Failed(message.clone());
@@ -7598,7 +9395,10 @@ impl MetrolistShell {
         let SearchViewState::Loaded(result) = &self.search_state else {
             return;
         };
-        self.play_song_collection(result.songs.clone(), index, window, cx);
+        let Some(song) = result.songs.get(index).cloned() else {
+            return;
+        };
+        self.play_discovery_song(song, window, cx);
     }
 
     fn reset_radio_queue(&mut self) {
@@ -7608,25 +9408,57 @@ impl MetrolistShell {
     }
 
     fn start_radio_from_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(song) = self.current_song.clone() else {
+            return;
+        };
+        self.start_radio_from_song(song, window, cx);
+    }
+
+    fn start_radio_from_song(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        if song.is_episode {
+            return;
+        }
+        let seed_video_id = song.video_id.clone();
         if self
             .current_song
             .as_ref()
-            .is_some_and(|song| song.is_episode)
+            .is_some_and(|current| current.video_id == seed_video_id)
         {
-            return;
+            self.reset_radio_queue();
+        } else {
+            self.play_song_collection(vec![song], 0, window, cx);
         }
-        let Some(seed_video_id) = self.current_song.as_ref().map(|song| song.video_id.clone())
-        else {
-            return;
-        };
-        self.reset_radio_queue();
+        self.auto_radio_refill_allowed = true;
         self.request_radio(
             RadioRequest::Initial {
                 seed_video_id,
                 replace_future: true,
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn start_browse_playback_endpoint(
+        &mut self,
+        endpoint: BrowsePlaybackEndpoint,
+        title: String,
+        shuffled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        self.auto_radio_refill_allowed = true;
+        self.request_radio(
+            RadioRequest::Endpoint {
+                endpoint,
+                title,
+                shuffled,
             },
             window,
             cx,
@@ -7645,7 +9477,9 @@ impl MetrolistShell {
 
     fn maybe_refill_radio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.listen_together_is_guest()
-            || !self.settings.auto_radio
+            || !self.auto_radio_refill_allowed
+            || (self.settings.disable_load_more_when_repeat_all
+                && self.repeat_mode == RepeatMode::All)
             || self.current_song.is_none()
             || self
                 .current_song
@@ -7665,7 +9499,7 @@ impl MetrolistShell {
         }
 
         let request = match &self.radio_state {
-            RadioQueueState::Idle => RadioRequest::Initial {
+            RadioQueueState::Idle if self.settings.auto_radio => RadioRequest::Initial {
                 seed_video_id: self
                     .current_song
                     .as_ref()
@@ -7675,13 +9509,15 @@ impl MetrolistShell {
                 replace_future: false,
             },
             RadioQueueState::Active(session)
-                if session.continuation.as_ref().is_some_and(|token| {
-                    !token.is_empty() && !session.seen_continuations.contains(token)
-                }) =>
+                if self.settings.auto_load_more
+                    && session.continuation.as_ref().is_some_and(|token| {
+                        !token.is_empty() && !session.seen_continuations.contains(token)
+                    }) =>
             {
                 RadioRequest::Continuation(Box::new(session.clone()))
             }
-            RadioQueueState::Loading(_)
+            RadioQueueState::Idle
+            | RadioQueueState::Loading(_)
             | RadioQueueState::Active(_)
             | RadioQueueState::Exhausted(_)
             | RadioQueueState::Failed(_, _) => return,
@@ -7704,6 +9540,9 @@ impl MetrolistShell {
         self.radio_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match &request {
                 RadioRequest::Initial { seed_video_id, .. } => client.radio(seed_video_id).await,
+                RadioRequest::Endpoint { endpoint, .. } => {
+                    client.playback_queue(endpoint.clone()).await
+                }
                 RadioRequest::Continuation(session) => {
                     let continuation = session.continuation.as_deref().ok_or_else(|| {
                         crate::AppError::Protocol("radio session has no continuation".into())
@@ -7742,6 +9581,13 @@ impl MetrolistShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if page.songs.is_empty() && matches!(&request, RadioRequest::Endpoint { .. }) {
+            self.radio_state = RadioQueueState::Failed(
+                request,
+                "YouTube Music returned an empty artist queue".into(),
+            );
+            return;
+        }
         let (session, songs, stop_without_progress) = match request {
             RadioRequest::Initial {
                 seed_video_id,
@@ -7755,6 +9601,7 @@ impl MetrolistShell {
                     accept_radio_continuation(&mut seen_continuations, None, page.continuation);
                 if replace_future && !songs.is_empty() {
                     self.queue.truncate_after_current();
+                    self.shuffle_primary_len = self.queue.len();
                 }
                 (
                     RadioSession {
@@ -7766,6 +9613,38 @@ impl MetrolistShell {
                         seen_continuations,
                     },
                     songs,
+                    false,
+                )
+            }
+            RadioRequest::Endpoint {
+                title, shuffled, ..
+            } => {
+                let selected_index = page
+                    .current_index
+                    .unwrap_or_default()
+                    .min(page.songs.len().saturating_sub(1));
+                let seed_video_id = page.songs[selected_index].video_id.clone();
+                let songs = page.recommendations_after_current(&seed_video_id);
+                let mut recommendations = Vec::new();
+                extend_radio_recommendations(&mut recommendations, &seed_video_id, &songs);
+                let mut seen_continuations = HashSet::new();
+                let continuation =
+                    accept_radio_continuation(&mut seen_continuations, None, page.continuation);
+                self.play_song_collection(page.songs, selected_index, window, cx);
+                if shuffled {
+                    self.shuffle_enabled = true;
+                    self.save_session(cx);
+                }
+                (
+                    RadioSession {
+                        seed_video_id,
+                        title: page.title.or(Some(title)),
+                        recommendations,
+                        endpoint: page.endpoint,
+                        continuation,
+                        seen_continuations,
+                    },
+                    Vec::new(),
                     false,
                 )
             }
@@ -7796,7 +9675,7 @@ impl MetrolistShell {
                 .map(|song| QueueItem { song }),
         );
         if added > 0 && self.shuffle_enabled {
-            self.queue.shuffle_upcoming();
+            self.shuffle_queue_upcoming();
         }
         let exhausted = session.continuation.is_none() || (stop_without_progress && added == 0);
         self.radio_state = if exhausted {
@@ -7820,18 +9699,47 @@ impl MetrolistShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.play_song_collection_with_radio_refill(songs, index, true, window, cx);
+    }
+
+    fn play_song_collection_with_radio_refill(
+        &mut self,
+        songs: Vec<Song>,
+        index: usize,
+        allow_radio_refill: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.reject_guest_playback_control(cx) {
             return;
         }
         self.reset_radio_queue();
-        self.shuffle_enabled = false;
+        self.auto_radio_refill_allowed = allow_radio_refill;
+        let keep_shuffle = self.settings.persistent_shuffle_across_queues && self.shuffle_enabled;
+        if !keep_shuffle {
+            self.shuffle_enabled = false;
+        }
         let items = songs.into_iter().map(|song| QueueItem { song }).collect();
         let song = self
             .queue
             .replace_and_select(items, index)
             .map(|item| item.song.clone());
+        self.shuffle_primary_len = self.queue.len();
+        if keep_shuffle {
+            self.shuffle_queue_upcoming();
+        }
         if let Some(song) = song {
             self.start_playback(song, window, cx);
+        }
+    }
+
+    fn play_discovery_song(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
+        if song.is_episode {
+            self.play_song_collection_with_radio_refill(vec![song], 0, false, window, cx);
+        } else if self.settings.auto_radio_queue {
+            self.start_radio_from_song(song, window, cx);
+        } else {
+            self.play_song_collection_with_radio_refill(vec![song], 0, false, window, cx);
         }
     }
 
@@ -7844,6 +9752,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) || songs.is_empty() {
             return;
         }
+        self.shuffle_enabled = false;
         fastrand::shuffle(&mut songs);
         self.play_song_collection(songs, 0, window, cx);
         self.shuffle_enabled = true;
@@ -7861,6 +9770,134 @@ impl MetrolistShell {
         }
     }
 
+    fn start_browse_collection_action(
+        &mut self,
+        action: BrowseCollectionAction,
+        page: BrowsePage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browse_collection_action.is_some()
+            || (!matches!(
+                action,
+                BrowseCollectionAction::DownloadAll | BrowseCollectionAction::AddToLocalPlaylist
+            ) && self.reject_guest_playback_control(cx))
+        {
+            return;
+        }
+        let browse_id = page.item.browse_id.clone();
+        let client = self.search_client.clone();
+        self.browse_collection_action = Some(action);
+        self.browse_collection_action_error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.complete_browse_page(page).await;
+            this.update_in(cx, |this, window, cx| {
+                this.browse_collection_action = None;
+                let current_page_matches = matches!(
+                    &this.browse_state,
+                    Some(BrowseViewState::Loaded(current))
+                        if current.item.browse_id == browse_id
+                );
+                match result {
+                    Ok(page) => {
+                        let songs = if page.item.editable && !page.playlist_entries.is_empty() {
+                            page.playlist_entries
+                                .into_iter()
+                                .map(|entry| entry.song)
+                                .collect()
+                        } else {
+                            page.songs
+                        };
+                        if songs.is_empty() {
+                            if current_page_matches {
+                                this.browse_collection_action_error =
+                                    Some("This collection has no playable tracks.".into());
+                            }
+                        } else {
+                            match action {
+                                BrowseCollectionAction::PlayAll => {
+                                    this.play_song_collection(songs, 0, window, cx)
+                                }
+                                BrowseCollectionAction::Shuffle => {
+                                    this.play_shuffled_collection(songs, window, cx)
+                                }
+                                BrowseCollectionAction::PlayNext => {
+                                    this.play_collection_next(songs, window, cx)
+                                }
+                                BrowseCollectionAction::AddToQueue => {
+                                    this.add_collection_to_queue(songs, window, cx)
+                                }
+                                BrowseCollectionAction::AddToLocalPlaylist => {
+                                    this.open_playlist_picker_songs(songs, cx)
+                                }
+                                BrowseCollectionAction::DownloadAll => {
+                                    for song in songs {
+                                        this.queue_song_download(song, cx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if current_page_matches => {
+                        this.browse_collection_action_error = Some(error.to_string());
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn play_collection_next(
+        &mut self,
+        songs: Vec<Song>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reject_guest_playback_control(cx) || songs.is_empty() {
+            return;
+        }
+        if self.queue.current().is_none() {
+            self.play_song_collection(songs, 0, window, cx);
+            return;
+        }
+        self.remove_existing_queue_items(&songs);
+        for song in songs.into_iter().rev() {
+            self.queue.insert_after_current(QueueItem { song });
+        }
+        self.save_session(cx);
+        self.refresh_visible_thumbnails(cx);
+        cx.notify();
+    }
+
+    fn add_collection_to_queue(
+        &mut self,
+        songs: Vec<Song>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reject_guest_playback_control(cx) || songs.is_empty() {
+            return;
+        }
+        if self.queue.current().is_none() {
+            self.play_song_collection(songs, 0, window, cx);
+            return;
+        }
+        self.remove_existing_queue_items(&songs);
+        for song in songs {
+            self.queue.push(QueueItem { song });
+        }
+        if self.shuffle_enabled {
+            self.shuffle_queue_upcoming();
+        }
+        self.save_session(cx);
+        self.refresh_visible_thumbnails(cx);
+        cx.notify();
+    }
+
     fn play_song_next(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
         if self.reject_guest_playback_control(cx) {
             return;
@@ -7870,6 +9907,7 @@ impl MetrolistShell {
             return;
         }
 
+        self.remove_existing_queue_items(std::slice::from_ref(&song));
         self.queue.insert_after_current(QueueItem { song });
         self.save_session(cx);
         self.refresh_visible_thumbnails(cx);
@@ -7885,13 +9923,21 @@ impl MetrolistShell {
             return;
         }
 
+        self.remove_existing_queue_items(std::slice::from_ref(&song));
         self.queue.push(QueueItem { song });
         if self.shuffle_enabled {
-            self.queue.shuffle_upcoming();
+            self.shuffle_queue_upcoming();
         }
         self.save_session(cx);
         self.refresh_visible_thumbnails(cx);
         cx.notify();
+    }
+
+    fn remove_existing_queue_items(&mut self, songs: &[Song]) {
+        if self.settings.prevent_duplicate_tracks_in_queue {
+            self.queue
+                .remove_video_ids_except_current(songs.iter().map(|song| song.video_id.as_str()));
+        }
     }
 
     fn move_queue_item(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
@@ -7927,6 +9973,7 @@ impl MetrolistShell {
         let snapshot = self.audio_player.snapshot();
         self.save_current_episode_progress(snapshot.position, cx);
         self.playback_task = None;
+        self.pending_crossfade_duration = None;
         self.episode_resume_generation = self.episode_resume_generation.wrapping_add(1);
         self.resolving_playback = false;
         self.playback_source_attempt = PlaybackSourceAttempt::None;
@@ -7961,7 +10008,7 @@ impl MetrolistShell {
             Some(item.song.clone())
         } else if self.repeat_mode == RepeatMode::All && !self.queue.is_empty() {
             if self.shuffle_enabled {
-                self.queue.shuffle_around_current();
+                self.shuffle_queue_for_new_cycle();
             }
             self.queue.select(0).map(|item| item.song.clone())
         } else {
@@ -7998,13 +10045,30 @@ impl MetrolistShell {
         }
     }
 
+    fn shuffle_queue_upcoming(&mut self) {
+        if self.settings.shuffle_playlist_first {
+            self.queue
+                .shuffle_upcoming_partitioned(self.shuffle_primary_len);
+        } else {
+            self.queue.shuffle_upcoming();
+        }
+    }
+
+    fn shuffle_queue_for_new_cycle(&mut self) {
+        if self.settings.shuffle_playlist_first {
+            self.queue.shuffle_all_partitioned(self.shuffle_primary_len);
+        } else {
+            self.queue.shuffle_around_current();
+        }
+    }
+
     fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         if self.reject_guest_playback_control(cx) || self.queue.is_empty() {
             return;
         }
         self.shuffle_enabled = !self.shuffle_enabled;
         if self.shuffle_enabled {
-            self.queue.shuffle_upcoming();
+            self.shuffle_queue_upcoming();
         }
         self.save_session(cx);
         cx.notify();
@@ -8023,12 +10087,85 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) || self.current_song.is_none() {
             return;
         }
+        self.set_sleep_timer_volume_multiplier(1.0);
+        self.sleep_timer_song_id = timer.stops_after_song().then(|| {
+            self.current_song
+                .as_ref()
+                .expect("the current song was checked above")
+                .video_id
+                .clone()
+        });
         self.sleep_timer = Some(timer);
         cx.notify();
     }
 
-    fn cancel_sleep_timer(&mut self, cx: &mut Context<Self>) {
+    fn set_sleep_timer_volume_multiplier(&mut self, multiplier: f32) {
+        let multiplier = multiplier.clamp(0.0, 1.0);
+        if (self.sleep_timer_volume_multiplier - multiplier).abs() < 0.005 {
+            return;
+        }
+        self.sleep_timer_volume_multiplier = multiplier;
+        self.audio_player.set_volume_multiplier(multiplier);
+    }
+
+    fn update_sleep_timer_volume(
+        &mut self,
+        now: Instant,
+        position: Duration,
+        duration: Option<Duration>,
+    ) {
+        let multiplier = self.sleep_timer.map_or(1.0, |timer| {
+            timer.volume_multiplier(now, position, duration)
+        });
+        self.set_sleep_timer_volume_multiplier(multiplier);
+    }
+
+    fn finish_sleep_timer(&mut self) {
         self.sleep_timer = None;
+        self.sleep_timer_song_id = None;
+        self.set_sleep_timer_volume_multiplier(1.0);
+    }
+
+    fn start_sleep_timer_minutes(&mut self, minutes: u64, cx: &mut Context<Self>) {
+        self.set_sleep_timer(
+            SleepTimer::Deadline {
+                deadline: Instant::now() + Duration::from_secs(minutes * 60),
+                stop_after_current_song: self.settings.sleep_timer_stop_after_current_song,
+                fade_out: self.settings.sleep_timer_fade_out,
+            },
+            cx,
+        );
+    }
+
+    fn start_end_of_song_sleep_timer(&mut self, cx: &mut Context<Self>) {
+        self.set_sleep_timer(
+            SleepTimer::EndOfSong {
+                fade_out: self.settings.sleep_timer_fade_out,
+            },
+            cx,
+        );
+    }
+
+    fn adjust_sleep_timer_minutes(&mut self, delta: i16, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+        self.sleep_timer_minutes = (self.sleep_timer_minutes as i16 + delta).clamp(
+            MIN_SLEEP_TIMER_MINUTES as i16,
+            MAX_SLEEP_TIMER_MINUTES as i16,
+        ) as u16;
+        cx.notify();
+    }
+
+    fn start_custom_sleep_timer(&mut self, cx: &mut Context<Self>) {
+        self.start_sleep_timer_minutes(u64::from(self.sleep_timer_minutes), cx);
+    }
+
+    fn cancel_sleep_timer(&mut self, cx: &mut Context<Self>) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        self.finish_sleep_timer();
         cx.notify();
     }
 
@@ -8037,6 +10174,7 @@ impl MetrolistShell {
             return;
         }
         self.queue.truncate_after_current();
+        self.shuffle_primary_len = self.queue.len();
         self.reset_radio_queue();
         self.save_session(cx);
         self.refresh_visible_thumbnails(cx);
@@ -8044,7 +10182,64 @@ impl MetrolistShell {
     }
 
     fn advance_after_end(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.advance_to_queue_end_target(None, window, cx)
+    }
+
+    fn maybe_start_crossfade(
+        &mut self,
+        snapshot: &PlaybackSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.settings.crossfade
+            || self.resolving_playback
+            || snapshot.state != PlaybackState::Playing
+            || self.playback_error.is_some()
+            || self.listen_together_is_guest()
+            || self.sleep_timer.is_some_and(SleepTimer::stops_after_song)
+            || self
+                .current_song
+                .as_ref()
+                .is_none_or(|song| song.is_episode)
+            || (self.repeat_mode == RepeatMode::Off && !self.settings.autoplay)
+        {
+            return false;
+        }
+
+        let crossfade_duration = Duration::from_secs(u64::from(self.settings.crossfade_seconds));
+        let Some(duration) = snapshot.duration.or_else(|| self.playback_duration()) else {
+            return false;
+        };
+        if duration <= crossfade_duration || snapshot.position >= duration {
+            return false;
+        }
+        let remaining = duration.saturating_sub(snapshot.position);
+        if remaining > crossfade_duration {
+            return false;
+        }
+
+        let action = queue_end_action(
+            self.repeat_mode,
+            self.queue.current().is_some(),
+            self.queue.has_next(),
+        );
+        if action == QueueEndAction::Stop {
+            return false;
+        }
+
+        self.advance_to_queue_end_target(Some(crossfade_duration), window, cx)
+    }
+
+    fn advance_to_queue_end_target(
+        &mut self,
+        crossfade_duration: Option<Duration>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.listen_together_is_guest() {
+            return false;
+        }
+        if self.repeat_mode == RepeatMode::Off && !self.settings.autoplay {
             return false;
         }
         let action = queue_end_action(
@@ -8052,12 +10247,20 @@ impl MetrolistShell {
             self.queue.current().is_some(),
             self.queue.has_next(),
         );
+        let queue_before_crossfade = crossfade_duration.map(|_| self.queue.clone());
+        let previous_album_id = crossfade_duration.and_then(|_| {
+            self.current_song
+                .as_ref()
+                .and_then(|song| song.album.as_ref())
+                .map(|album| album.browse_id.clone())
+                .filter(|album_id| !album_id.is_empty())
+        });
         let (song, resume_episode) = match action {
             QueueEndAction::Stop => (None, true),
             QueueEndAction::Advance => (self.queue.next_item().map(|item| item.song.clone()), true),
             QueueEndAction::Wrap => {
                 if self.shuffle_enabled {
-                    self.queue.shuffle_around_current();
+                    self.shuffle_queue_for_new_cycle();
                 }
                 (self.queue.select(0).map(|item| item.song.clone()), false)
             }
@@ -8066,14 +10269,55 @@ impl MetrolistShell {
         let Some(song) = song else {
             return false;
         };
+        let same_album = previous_album_id.is_some_and(|album_id| {
+            song.album
+                .as_ref()
+                .is_some_and(|album| album.browse_id == album_id)
+        });
+        if crossfade_duration.is_some()
+            && (song.is_episode || (self.settings.crossfade_gapless_albums && same_album))
+        {
+            if let Some(queue) = queue_before_crossfade {
+                self.queue = queue;
+            }
+            return false;
+        }
+        self.pending_crossfade_duration = crossfade_duration;
         self.start_playback_with_episode_resume(song, resume_episode, window, cx);
         true
+    }
+
+    fn set_local_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        let state = self.audio_player.snapshot().state;
+        self.audio_player.set_volume(volume);
+        if !self.settings.pause_on_mute {
+            self.paused_by_mute = false;
+            return;
+        }
+        if volume == 0.0 {
+            if state == PlaybackState::Playing {
+                match self.audio_player.pause() {
+                    Ok(()) => self.paused_by_mute = true,
+                    Err(error) => self.playback_error = Some(error.to_string()),
+                }
+            }
+            return;
+        }
+        if std::mem::take(&mut self.paused_by_mute) && state == PlaybackState::Paused {
+            self.playback_error = self
+                .audio_player
+                .play()
+                .err()
+                .map(|error| error.to_string());
+        }
     }
 
     fn play_from_desktop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.paused_by_mute = false;
         if self.resolving_playback {
             return;
         }
@@ -8095,6 +10339,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.paused_by_mute = false;
         if self.audio_player.snapshot().state == PlaybackState::Playing {
             self.playback_error = self
                 .audio_player
@@ -8109,6 +10354,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.paused_by_mute = false;
         self.playback_task = None;
         self.resolving_playback = false;
         self.playback_source_attempt = PlaybackSourceAttempt::None;
@@ -8148,6 +10394,39 @@ impl MetrolistShell {
         cx.notify();
     }
 
+    fn seek_from_artwork(&mut self, direction: DesktopSeekDirection, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+
+        let now = Instant::now();
+        self.artwork_seek_multiplier = if self.settings.progressive_seek
+            && self
+                .last_artwork_seek
+                .is_some_and(|last_seek| now.duration_since(last_seek) < PROGRESSIVE_SEEK_WINDOW)
+        {
+            self.artwork_seek_multiplier.saturating_add(1)
+        } else {
+            1
+        };
+        self.last_artwork_seek = Some(now);
+
+        let amount = ARTWORK_SEEK_STEP.saturating_mul(self.artwork_seek_multiplier);
+        let position = self
+            .pending_resume_position
+            .unwrap_or_else(|| self.audio_player.snapshot().position);
+        let target = match direction {
+            DesktopSeekDirection::Forward => position.saturating_add(amount),
+            DesktopSeekDirection::Backward => position.saturating_sub(amount),
+        };
+        let action = match direction {
+            DesktopSeekDirection::Forward => "Forward",
+            DesktopSeekDirection::Backward => "Back",
+        };
+        self.now_playing_notice = Some(format!("{action} {} seconds", amount.as_secs()));
+        self.seek_from_desktop(target, cx);
+    }
+
     fn handle_desktop_media_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for command in self.desktop_media.drain_commands() {
             if self.listen_together_is_guest()
@@ -8181,7 +10460,7 @@ impl MetrolistShell {
                     self.seek_from_desktop(position, cx);
                 }
                 DesktopMediaCommand::SetVolume(volume) => {
-                    self.audio_player.set_volume(volume);
+                    self.set_local_volume(volume);
                     self.save_session(cx);
                     cx.notify();
                 }
@@ -8467,6 +10746,7 @@ impl MetrolistShell {
             .queue
             .replace(items, current_index)
             .map(|item| item.song.clone());
+        self.shuffle_primary_len = self.queue.len();
         if let Some(song) = song {
             self.set_current_song(song, cx);
         } else {
@@ -9037,19 +11317,38 @@ impl MetrolistShell {
         if self.last_playback_state == PlaybackState::Playing {
             self.played_this_track += poll_elapsed.min(Duration::from_secs(1));
         }
-        if self
-            .sleep_timer
-            .is_some_and(|timer| timer.deadline_reached(now))
-        {
-            self.sleep_timer = None;
+        let snapshot = self.audio_player.snapshot();
+        if let Some(timer) = self.sleep_timer.filter(|timer| timer.deadline_reached(now)) {
+            if let Some(end_of_song) = timer.after_deadline() {
+                self.sleep_timer = Some(end_of_song);
+                self.sleep_timer_song_id =
+                    self.current_song.as_ref().map(|song| song.video_id.clone());
+            } else {
+                self.play_after_resolution = Some(false);
+                self.playback_error = self
+                    .audio_player
+                    .pause()
+                    .err()
+                    .map(|error| error.to_string());
+                self.finish_sleep_timer();
+            }
+        }
+        let sleep_timer_song_changed = self.sleep_timer.is_some_and(SleepTimer::stops_after_song)
+            && self.sleep_timer_song_id.as_deref()
+                != self
+                    .current_song
+                    .as_ref()
+                    .map(|song| song.video_id.as_str());
+        if sleep_timer_song_changed {
             self.play_after_resolution = Some(false);
             self.playback_error = self
                 .audio_player
                 .pause()
                 .err()
                 .map(|error| error.to_string());
+            self.finish_sleep_timer();
         }
-        let snapshot = self.audio_player.snapshot();
+        self.update_sleep_timer_volume(now, snapshot.position, snapshot.duration);
         let observed_state = if self.resolving_playback {
             PlaybackState::Loading
         } else if self.playback_error.is_some() || snapshot.error.is_some() {
@@ -9086,6 +11385,12 @@ impl MetrolistShell {
             && self.last_playback_state != PlaybackState::Failed;
         let just_paused = observed_state == PlaybackState::Paused
             && self.last_playback_state == PlaybackState::Playing;
+        if matches!(
+            observed_state,
+            PlaybackState::Playing | PlaybackState::Paused
+        ) {
+            self.consecutive_playback_errors = 0;
+        }
         let episode_save_due = observed_state == PlaybackState::Playing
             && now.saturating_duration_since(self.last_episode_progress_save)
                 >= EPISODE_POSITION_SAVE_INTERVAL;
@@ -9103,7 +11408,9 @@ impl MetrolistShell {
         if observed_state == PlaybackState::Playing {
             self.pending_resume_position = None;
         }
-        if !self.history_recorded_for_current && self.played_this_track >= HISTORY_THRESHOLD {
+        let history_threshold =
+            Duration::from_secs(u64::from(self.settings.history_duration_seconds));
+        if !self.history_recorded_for_current && self.played_this_track >= history_threshold {
             self.record_current_history(cx);
         }
         self.poll_lastfm(observed_state, snapshot.duration, cx);
@@ -9123,6 +11430,9 @@ impl MetrolistShell {
         );
         if now.saturating_duration_since(self.last_session_save) >= SESSION_SAVE_INTERVAL {
             self.save_session(cx);
+        }
+        if self.maybe_start_crossfade(&snapshot, window, cx) {
+            return;
         }
         if just_failed {
             if !snapshot.position.is_zero() {
@@ -9154,11 +11464,24 @@ impl MetrolistShell {
                 PlaybackSourceAttempt::Network => self.active_playback_source = None,
                 PlaybackSourceAttempt::None => {}
             }
+            if self.settings.auto_skip_next_on_error && !self.listen_together_is_guest() {
+                self.consecutive_playback_errors =
+                    self.consecutive_playback_errors.saturating_add(2);
+                let can_advance = self.queue.has_next()
+                    || (self.repeat_mode == RepeatMode::All && !self.queue.is_empty());
+                if self.consecutive_playback_errors <= MAX_CONSECUTIVE_PLAYBACK_ERRORS
+                    && can_advance
+                {
+                    self.play_next(window, cx);
+                    return;
+                }
+                self.consecutive_playback_errors = 0;
+            }
         }
         let sleep_after_song =
             just_ended && self.sleep_timer.is_some_and(SleepTimer::stops_after_song);
         if sleep_after_song {
-            self.sleep_timer = None;
+            self.finish_sleep_timer();
         }
         if just_ended && !sleep_after_song && self.advance_after_end(window, cx) {
             return;
@@ -9179,6 +11502,7 @@ impl MetrolistShell {
     }
 
     fn start_playback(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_crossfade_duration = None;
         self.start_playback_with_episode_resume(song, true, window, cx);
     }
 
@@ -9192,6 +11516,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.paused_by_mute = false;
         let previous = self.audio_player.snapshot();
         self.save_current_episode_progress(previous.position, cx);
         self.play_after_resolution = None;
@@ -9295,9 +11620,12 @@ impl MetrolistShell {
         self.playback_source_attempt = attempt;
         self.playback_error = None;
         let resume_position = self.pending_resume_position;
-        self.playback_error = self
-            .audio_player
-            .load(source)
+        let load_result = if let Some(duration) = self.pending_crossfade_duration.take() {
+            self.audio_player.load_with_crossfade(source, duration)
+        } else {
+            self.audio_player.load(source)
+        };
+        self.playback_error = load_result
             .and_then(|_| {
                 if let Some(position) = resume_position {
                     self.audio_player.seek(position)
@@ -9361,6 +11689,7 @@ impl MetrolistShell {
                         this.save_session(cx);
                     }
                     Err(error) => {
+                        this.pending_crossfade_duration = None;
                         this.playback_error = Some(error.to_string());
                     }
                 }
@@ -9374,6 +11703,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.paused_by_mute = false;
         let snapshot = self.audio_player.snapshot();
         let result = match snapshot.state {
             PlaybackState::Playing => self.audio_player.pause(),
@@ -9401,29 +11731,47 @@ impl MetrolistShell {
         cx.notify();
     }
 
-    fn nav_button(&self, route: Route, cx: &mut Context<Self>) -> Button {
-        let (id, icon) = match route {
-            Route::Home => ("nav-home", IconName::LayoutDashboard),
-            Route::Explore => ("nav-explore", IconName::BookOpen),
-            Route::Search => ("nav-search", IconName::Search),
-            Route::Recognition => ("nav-recognition", IconName::Asterisk),
-            Route::History => ("nav-history", IconName::Undo2),
-            Route::Stats => ("nav-stats", IconName::ChartPie),
-            Route::Library => ("nav-library", IconName::BookOpen),
-            Route::Settings => ("nav-settings", IconName::Settings),
-        };
-
-        Button::new(id)
-            .ghost()
-            .w_full()
-            .justify_start()
-            .icon(icon)
-            .label(route.title())
-            .selected(self.model.route() == route)
-            .on_click(cx.listener(move |this, _, _, cx| this.navigate(route, cx)))
+    fn route_icon(route: Route) -> IconName {
+        match route {
+            Route::Home => IconName::LayoutDashboard,
+            Route::Explore => IconName::Globe,
+            Route::Search => IconName::Search,
+            Route::Recognition => IconName::Asterisk,
+            Route::History => IconName::Undo2,
+            Route::Stats => IconName::ChartPie,
+            Route::Library => IconName::BookOpen,
+            Route::Settings => IconName::Settings,
+        }
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar_nav_item(&self, route: Route, cx: &mut Context<Self>) -> SidebarMenuItem {
+        let view = cx.entity();
+        SidebarMenuItem::new(route.title())
+            .icon(Self::route_icon(route))
+            .active(self.model.route() == route)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| this.navigate(route, cx));
+            })
+    }
+
+    fn sidebar_nav_group(
+        &self,
+        label: &'static str,
+        routes: &[Route],
+        cx: &mut Context<Self>,
+    ) -> SidebarGroup<SidebarMenu> {
+        SidebarGroup::new(label).child(
+            SidebarMenu::new().children(
+                routes
+                    .iter()
+                    .copied()
+                    .map(|route| self.sidebar_nav_item(route, cx)),
+            ),
+        )
+    }
+
+    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.sidebar_collapsed;
         let (account_title, account_detail) =
             sidebar_account_summary(&self.account_state, self.account_operation);
         let account_icon = match self.account_state {
@@ -9431,84 +11779,102 @@ impl MetrolistShell {
             AccountViewState::Expired(_) | AccountViewState::Failed(_) => IconName::TriangleAlert,
             AccountViewState::SignedOut | AccountViewState::SignedIn(_) => IconName::User,
         };
-        v_flex()
-            .h_full()
-            .w(px(220.))
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .p_4()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .h(px(56.))
-                    .mb_5()
+        let view = cx.entity();
+        Sidebar::new("metrolist-sidebar")
+            .collapsible(SidebarCollapsible::Icon)
+            .collapsed(collapsed)
+            .w(px(228.))
+            .header(
+                SidebarHeader::new()
                     .child(
                         div()
-                            .size_9()
+                            .size_8()
                             .flex()
                             .items_center()
                             .justify_center()
+                            .flex_shrink_0()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().sidebar_primary)
                             .text_color(cx.theme().sidebar_primary_foreground)
                             .child(Icon::new(IconName::Play)),
                     )
-                    .child(
-                        v_flex()
-                            .child(div().font_semibold().child("Metrolist"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Music for desktop"),
-                            ),
-                    ),
+                    .when(!collapsed, |header| {
+                        header.child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .child(div().font_semibold().child("Metrolist"))
+                                .child(caption_line(
+                                    "Music for desktop",
+                                    cx.theme().muted_foreground,
+                                )),
+                        )
+                    })
+                    .child(SidebarToggleButton::new().collapsed(collapsed).on_click({
+                        let view = view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.sidebar_collapsed = !this.sidebar_collapsed;
+                                cx.notify();
+                            });
+                        }
+                    })),
             )
-            .child(
+            .child(self.sidebar_nav_group(
+                "Browse",
+                &[
+                    Route::Home,
+                    Route::Explore,
+                    Route::Search,
+                    Route::Recognition,
+                ],
+                cx,
+            ))
+            .child(self.sidebar_nav_group(
+                "Your music",
+                &[Route::History, Route::Stats, Route::Library],
+                cx,
+            ))
+            .footer(
                 v_flex()
+                    .w_full()
                     .gap_1()
-                    .children(Route::ALL.map(|route| self.nav_button(route, cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("sidebar-account-settings")
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .rounded(cx.theme().radius)
-                    .p_3()
-                    .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.8)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.navigate(Route::Settings, cx);
-                    }))
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Icon::new(account_icon).size_4())
+                        SidebarMenu::new()
+                            .collapsed(collapsed)
+                            .child(self.sidebar_nav_item(Route::Settings, cx))
+                            .render("nav-settings-menu", window, cx),
+                    )
+                    .child(
+                        div()
+                            .id("sidebar-account")
+                            .w_full()
+                            .cursor_pointer()
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.navigate(Route::Settings, cx);
+                                    });
+                                }
+                            })
                             .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .overflow_hidden()
-                                            .text_sm()
-                                            .font_medium()
-                                            .child(account_title),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .overflow_hidden()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(account_detail),
-                                    ),
+                                SidebarFooter::new()
+                                    .collapsed(collapsed)
+                                    .selected(self.model.route() == Route::Settings)
+                                    .child(Icon::new(account_icon).size_4())
+                                    .when(!collapsed, |footer| {
+                                        footer.child(
+                                            v_flex()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .child(title_line(account_title).text_sm())
+                                                .child(caption_line(
+                                                    account_detail,
+                                                    cx.theme().muted_foreground,
+                                                )),
+                                        )
+                                    }),
                             ),
                     ),
             )
@@ -9521,6 +11887,7 @@ impl MetrolistShell {
         cx: &App,
     ) -> impl IntoElement {
         v_flex()
+            .flex_shrink_0()
             .gap_1()
             .child(div().text_2xl().font_semibold().child(title))
             .child(
@@ -9543,8 +11910,6 @@ impl MetrolistShell {
             .min_w(px(180.))
             .gap_3()
             .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
             .p_5()
             .child(
@@ -9610,6 +11975,107 @@ impl MetrolistShell {
         picks
     }
 
+    fn home_speed_dial_recommendations(&self) -> Vec<Song> {
+        const TARGET_SIZE: usize = 27;
+
+        let mut seen = HashSet::new();
+        let pinned_count = match &self.speed_dial_state {
+            StoredViewState::Loaded(songs) => {
+                for song in songs {
+                    seen.insert(song.video_id.clone());
+                }
+                songs.len()
+            }
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        } + match &self.speed_dial_browse_state {
+            StoredViewState::Loaded(items) => {
+                for item in items {
+                    seen.insert(item.browse_id.clone());
+                }
+                items.len()
+            }
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        } + match &self.speed_dial_local_playlists_state {
+            StoredViewState::Loaded(playlists) => {
+                for playlist in playlists {
+                    seen.insert(playlist.id.to_string());
+                }
+                playlists.len()
+            }
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        };
+
+        let mut recommendations = Vec::new();
+        let remaining = TARGET_SIZE.saturating_sub(pinned_count);
+        let mut add_song = |song: &Song| {
+            if !song.is_episode
+                && recommendations.len() < remaining
+                && seen.insert(song.video_id.clone())
+            {
+                recommendations.push(song.clone());
+            }
+        };
+        if let StoredViewState::Loaded(songs) = &self.keep_listening_state {
+            for song in songs {
+                add_song(song);
+            }
+        }
+        for song in self.home_quick_picks() {
+            add_song(&song);
+        }
+        recommendations
+    }
+
+    fn random_speed_dial_candidates(&self) -> (Vec<Song>, Vec<BrowseItem>) {
+        let mut songs = Vec::new();
+        let mut seen_songs = HashSet::new();
+        let mut add_song = |song: &Song| {
+            if !song.is_episode && seen_songs.insert(song.video_id.clone()) {
+                songs.push(song.clone());
+            }
+        };
+        for song in self.home_quick_picks() {
+            add_song(&song);
+        }
+        if let StoredViewState::Loaded(items) = &self.keep_listening_state {
+            for song in items {
+                add_song(song);
+            }
+        }
+
+        let mut browse_items = Vec::new();
+        let mut seen_browse = HashSet::new();
+        if let HomeFeedState::Loaded(page) = &self.home_state {
+            for item in page.sections.iter().flat_map(|section| &section.items) {
+                if let HomeItem::Browse(item) = item
+                    && item.kind != BrowseKind::Category
+                    && seen_browse.insert((item.kind, item.browse_id.clone()))
+                {
+                    browse_items.push(item.clone());
+                }
+            }
+        }
+        (songs, browse_items)
+    }
+
+    fn activate_random_speed_dial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+        let (songs, browse_items) = self.random_speed_dial_candidates();
+        let choose_song = !songs.is_empty() && (browse_items.is_empty() || fastrand::f32() < 0.8);
+        if choose_song {
+            let song = songs[fastrand::usize(..songs.len())].clone();
+            self.play_discovery_song(song, window, cx);
+        } else if !browse_items.is_empty() {
+            let item = browse_items[fastrand::usize(..browse_items.len())].clone();
+            self.open_online_browse(item, cx);
+        } else {
+            self.speed_dial_error = Some("No Speed Dial recommendations are available yet.".into());
+            cx.notify();
+        }
+    }
+
     fn render_home_section(
         &self,
         section_index: usize,
@@ -9652,211 +12118,62 @@ impl MetrolistShell {
             .items_end()
             .justify_between()
             .gap_3()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_lg().font_semibold().child(section.title.clone()))
-                    .when_some(section.label.clone(), |column, label| {
-                        column.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(label),
-                        )
-                    }),
-            )
-            .when_some(more, |row, item| {
-                row.child(
-                    Button::new(format!("home-section-more-{section_index}"))
-                        .ghost()
-                        .label("More")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_online_browse(item.clone(), cx);
-                        })),
-                )
-            })
-            .when(play_all && !songs.is_empty(), |row| {
-                row.child(
-                    Button::new(format!("home-section-play-all-{section_index}"))
-                        .primary()
-                        .icon(IconName::Play)
-                        .label("Play all")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.play_song_collection(
-                                play_all_songs.as_ref().clone(),
-                                0,
-                                window,
-                                cx,
-                            );
-                        })),
-                )
-            });
-
-        v_flex()
-            .gap_3()
-            .child(header)
+            .child(section_heading(
+                section.title.clone(),
+                section.label.clone().map(SharedString::from),
+                cx,
+            ))
             .child(
                 h_flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .children(section.items.iter().enumerate().map(
-                        |(item_index, item)| match item {
-                            HomeItem::Song(song) => {
-                                let queue = songs.clone();
-                                let queue_index = queue
-                                    .iter()
-                                    .position(|candidate| candidate.video_id == song.video_id)
-                                    .unwrap_or_default();
-                                v_flex()
-                                    .w(px(300.))
-                                    .min_w_0()
-                                    .gap_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_3()
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .min_w_0()
-                                            .gap_3()
-                                            .items_center()
-                                            .child(self.render_thumbnail(
-                                                song.thumbnail_url.as_deref(),
-                                                px(48.),
-                                                IconName::Play,
-                                                cx,
-                                            ))
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .font_medium()
-                                                            .overflow_hidden()
-                                                            .child(song.title.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(
-                                                                cx.theme().muted_foreground,
-                                                            )
-                                                            .overflow_hidden()
-                                                            .child(song.artist_line()),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .flex_wrap()
-                                            .gap_1()
-                                            .justify_end()
-                                            .child(self.download_button(
-                                                format!(
-                                                    "download-home-{section_index}-{item_index}"
-                                                ),
-                                                song,
-                                                cx,
-                                            ))
-                                            .child(self.queue_insert_buttons(
-                                                format!(
-                                                    "home-section-{section_index}-song-{item_index}"
-                                                ),
-                                                song,
-                                                cx,
-                                            ))
-                                            .child(
-                                                Button::new(format!(
-                                                    "home-section-{section_index}-song-{item_index}-play"
-                                                ))
-                                                .ghost()
-                                                .icon(IconName::Play)
-                                                .label("Play")
-                                                .tooltip("Play from this shelf")
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.play_song_collection(
-                                                            queue.as_ref().clone(),
-                                                            queue_index,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    )
-                                    .into_any_element()
-                            }
-                            HomeItem::Browse(item) => {
-                                let selected = item.clone();
-                                let icon = if item.kind == BrowseKind::Artist {
-                                    IconName::User
-                                } else {
-                                    IconName::BookOpen
-                                };
-                                v_flex()
-                                    .w(px(300.))
-                                    .min_w_0()
-                                    .gap_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_3()
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .min_w_0()
-                                            .gap_3()
-                                            .items_center()
-                                            .child(self.render_thumbnail(
-                                                item.thumbnail_url.as_deref(),
-                                                px(48.),
-                                                icon,
-                                                cx,
-                                            ))
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .font_medium()
-                                                            .overflow_hidden()
-                                                            .child(item.title.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(
-                                                                cx.theme().muted_foreground,
-                                                            )
-                                                            .overflow_hidden()
-                                                            .child(item.subtitle.clone()),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex().w_full().justify_end().child(
-                                            Button::new(format!(
-                                                "home-section-{section_index}-browse-{item_index}"
-                                            ))
-                                            .ghost()
-                                            .label("Open")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.open_online_browse(selected.clone(), cx);
-                                            })),
-                                        ),
-                                    )
-                                    .into_any_element()
-                            }
-                        },
-                    )),
-            )
+                    .gap_2()
+                    .flex_shrink_0()
+                    .when_some(more, |row, item| {
+                        row.child(
+                            Button::new(format!("home-section-more-{section_index}"))
+                                .ghost()
+                                .label("More")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_online_browse(item.clone(), cx);
+                                })),
+                        )
+                    })
+                    .when(play_all && !songs.is_empty(), |row| {
+                        row.child(
+                            Button::new(format!("home-section-play-all-{section_index}"))
+                                .primary()
+                                .icon(IconName::Play)
+                                .label("Play all")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.play_song_collection(
+                                        play_all_songs.as_ref().clone(),
+                                        0,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }),
+            );
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(header)
+            .child(tile_row().children(section.items.iter().enumerate().map(
+                |(item_index, item)| match item {
+                    HomeItem::Song(song) => self.render_song_tile(
+                        format!("home-{section_index}-{item_index}"),
+                        song,
+                        None,
+                        cx,
+                    ),
+                    HomeItem::Browse(item) => self.render_browse_tile(
+                        format!("home-{section_index}-browse-{item_index}"),
+                        item,
+                        cx,
+                    ),
+                },
+            )))
             .into_any_element()
     }
 
@@ -10031,70 +12348,321 @@ impl MetrolistShell {
                         }),
                 )
                 .child(
-                    h_flex().flex_wrap().gap_3().children(
-                        library
-                            .playlists
-                            .iter()
-                            .take(12)
-                            .enumerate()
-                            .map(|(index, item)| {
-                                let selected = item.clone();
-                                v_flex()
-                                    .w(px(260.))
-                                    .min_w_0()
-                                    .gap_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_3()
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .min_w_0()
-                                            .items_center()
-                                            .gap_3()
-                                            .child(self.render_thumbnail(
-                                                item.thumbnail_url.as_deref(),
-                                                px(48.),
-                                                IconName::BookOpen,
-                                                cx,
-                                            ))
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .font_medium()
-                                                            .overflow_hidden()
-                                                            .child(item.title.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .overflow_hidden()
-                                                            .child(item.subtitle.clone()),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex().w_full().justify_end().child(
-                                            Button::new(format!("home-account-playlist-{index}"))
-                                                .ghost()
-                                                .label("Open")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_online_browse(selected.clone(), cx);
-                                                })),
-                                        ),
-                                    )
-                                    .into_any_element()
-                            }),
-                    ),
+                    tile_row().children(library.playlists.iter().take(12).enumerate().map(
+                        |(index, item)| {
+                            self.render_browse_tile(
+                                format!("home-account-playlist-{index}"),
+                                item,
+                                cx,
+                            )
+                        },
+                    )),
                 )
                 .into_any_element(),
         )
+    }
+
+    fn render_home_speed_dial(&self, cx: &mut Context<Self>) -> AnyElement {
+        let recommendations = self.home_speed_dial_recommendations();
+        let (random_songs, random_browse_items) = self.random_speed_dial_candidates();
+        let randomize_available = !random_songs.is_empty() || !random_browse_items.is_empty();
+        let randomize_disabled = self.listen_together_is_guest() || !randomize_available;
+        let content = match (
+            &self.speed_dial_state,
+            &self.speed_dial_browse_state,
+            &self.speed_dial_local_playlists_state,
+        ) {
+            (StoredViewState::Loading, _, _)
+            | (_, StoredViewState::Loading, _)
+            | (_, _, StoredViewState::Loading) => h_flex()
+                .min_h(px(96.))
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::LoaderCircle))
+                .child("Loading Speed Dial…")
+                .into_any_element(),
+            (StoredViewState::Failed(message), _, _)
+            | (_, StoredViewState::Failed(message), _)
+            | (_, _, StoredViewState::Failed(message)) => h_flex()
+                .min_h(px(96.))
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .p_4()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().font_medium().child("Speed Dial unavailable"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child(message.clone()),
+                        ),
+                )
+                .child(
+                    Button::new("retry-speed-dial")
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.reload_speed_dial(cx))),
+                )
+                .into_any_element(),
+            (
+                StoredViewState::Loaded(songs),
+                StoredViewState::Loaded(items),
+                StoredViewState::Loaded(playlists),
+            ) if songs.is_empty()
+                && items.is_empty()
+                && playlists.is_empty()
+                && recommendations.is_empty()
+                && !randomize_available =>
+            {
+                let current = self
+                    .current_song
+                    .as_ref()
+                    .filter(|song| !song.is_episode)
+                    .cloned();
+                h_flex()
+                    .min_h(px(96.))
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_4()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_medium().child("No Speed Dial items yet"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "Pin a song, browse item, or local playlist for one-click access from Home.",
+                                    ),
+                            ),
+                    )
+                    .when_some(current, |row, song| {
+                        row.child(
+                            Button::new("speed-dial-pin-current")
+                                .label("Pin current song")
+                                .disabled(self.speed_dial_busy.is_some())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_speed_dial_song(song.clone(), cx);
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            }
+            (
+                StoredViewState::Loaded(songs),
+                StoredViewState::Loaded(items),
+                StoredViewState::Loaded(playlists),
+            ) => tile_row()
+                .child(
+                    media_tile_shell("speed-dial-randomize", cx)
+                        .opacity(if randomize_disabled { 0.55 } else { 1.0 })
+                        .when(!randomize_disabled, |tile| {
+                            tile.on_click(cx.listener(|this, _, window, cx| {
+                                this.activate_random_speed_dial(window, cx);
+                            }))
+                        })
+                        .child(self.render_cover_art(None, IconName::ChevronsUpDown, cx))
+                        .child(media_text_block(
+                            "Randomize",
+                            "Play a song or open something from Home",
+                            Some(SharedString::from(if self.listen_together_is_guest() {
+                                "Host controls playback"
+                            } else if !randomize_available {
+                                "No recommendations yet"
+                            } else {
+                                "Surprise me"
+                            })),
+                            cx,
+                        )),
+                )
+                .children(songs.iter().enumerate().map(|(index, song)| {
+                    let play_song = song.clone();
+                    let pinned_song = song.clone();
+                    let id = format!("speed-dial-{index}");
+                    let busy = self.speed_dial_busy.as_deref() == Some(song.video_id.as_str());
+                    media_tile_shell(SharedString::from(format!("speed-dial-tile-{index}")), cx)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.play_discovery_song(play_song.clone(), window, cx);
+                        }))
+                        .child(self.render_cover_art(
+                            song.thumbnail_url.as_deref(),
+                            IconName::Play,
+                            cx,
+                        ))
+                        .child(media_text_block(
+                            song.title.clone(),
+                            song.artist_line(),
+                            Some(SharedString::from("Pinned")),
+                            cx,
+                        ))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(self.download_button(
+                                    format!("speed-dial-download-{index}"),
+                                    song,
+                                    cx,
+                                ))
+                                .child(self.queue_insert_buttons(id, song, cx))
+                                .child(
+                                    Button::new(format!("speed-dial-unpin-{index}"))
+                                        .ghost()
+                                        .compact()
+                                        .label(if busy { "Removing…" } else { "Unpin" })
+                                        .disabled(self.speed_dial_busy.is_some())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_speed_dial_song(pinned_song.clone(), cx);
+                                        })),
+                                ),
+                        )
+                }))
+                .children(items.iter().enumerate().map(|(index, item)| {
+                    let selected = item.clone();
+                    let pinned_item = item.clone();
+                    let busy_key = format!("browse:{}:{}", item.kind.label(), item.browse_id);
+                    let busy = self.speed_dial_busy.as_deref() == Some(busy_key.as_str());
+                    let icon = if item.kind == BrowseKind::Artist {
+                        IconName::User
+                    } else {
+                        IconName::BookOpen
+                    };
+                    media_tile_shell(
+                        SharedString::from(format!("speed-dial-browse-tile-{index}")),
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_online_browse(selected.clone(), cx);
+                    }))
+                    .child(self.render_cover_art(item.thumbnail_url.as_deref(), icon, cx))
+                    .child(media_text_block(
+                        item.title.clone(),
+                        item.subtitle.clone(),
+                        Some(SharedString::from(item.kind.label())),
+                        cx,
+                    ))
+                    .child(
+                        h_flex().w_full().child(
+                            Button::new(format!("speed-dial-browse-unpin-{index}"))
+                                .ghost()
+                                .compact()
+                                .label(if busy { "Removing…" } else { "Unpin" })
+                                .disabled(self.speed_dial_busy.is_some())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_speed_dial_browse_item(pinned_item.clone(), cx);
+                                })),
+                        ),
+                    )
+                }))
+                .children(playlists.iter().enumerate().map(|(index, playlist)| {
+                    let selected = playlist.clone();
+                    let pinned_playlist = playlist.clone();
+                    let busy_key = format!("local-playlist:{}", playlist.id);
+                    let busy = self.speed_dial_busy.as_deref() == Some(busy_key.as_str());
+                    media_tile_shell(
+                        SharedString::from(format!("speed-dial-local-playlist-tile-{index}")),
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_playlist(selected.clone(), window, cx);
+                    }))
+                    .child(self.render_local_playlist_cover_art(
+                        playlist.thumbnail_url.as_deref(),
+                        &playlist.preview_thumbnail_urls,
+                        cx,
+                    ))
+                    .child(media_text_block(
+                        playlist.name.clone(),
+                        format!(
+                            "{} song{} · stored locally",
+                            playlist.song_count,
+                            if playlist.song_count == 1 { "" } else { "s" }
+                        ),
+                        Some(SharedString::from("Local playlist")),
+                        cx,
+                    ))
+                    .child(
+                        h_flex().w_full().child(
+                            Button::new(format!("speed-dial-local-playlist-unpin-{index}"))
+                                .ghost()
+                                .compact()
+                                .label(if busy { "Removing…" } else { "Unpin" })
+                                .disabled(self.speed_dial_busy.is_some())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_speed_dial_local_playlist(
+                                        pinned_playlist.clone(),
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    )
+                }))
+                .children(recommendations.iter().enumerate().map(|(index, song)| {
+                    let play_song = song.clone();
+                    let id = format!("speed-dial-recommendation-{index}");
+                    media_tile_shell(
+                        SharedString::from(format!("speed-dial-recommendation-tile-{index}")),
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.play_discovery_song(play_song.clone(), window, cx);
+                    }))
+                    .child(self.render_cover_art(song.thumbnail_url.as_deref(), IconName::Play, cx))
+                    .child(media_text_block(
+                        song.title.clone(),
+                        song.artist_line(),
+                        Some(SharedString::from("Recommended")),
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(self.download_button(
+                                format!("speed-dial-recommendation-download-{index}"),
+                                song,
+                                cx,
+                            ))
+                            .child(self.queue_insert_buttons(id, song, cx)),
+                    )
+                }))
+                .into_any_element(),
+        };
+
+        v_flex()
+            .gap_3()
+            .child(section_heading(
+                "Speed Dial",
+                Some(SharedString::from(
+                    "Pinned items first, followed by recommendations from your listening.",
+                )),
+                cx,
+            ))
+            .when_some(self.speed_dial_error.clone(), |layout, message| {
+                layout.child(div().text_sm().text_color(cx.theme().danger).child(message))
+            })
+            .when_some(self.speed_dial_notice.clone(), |layout, message| {
+                layout.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(message),
+                )
+            })
+            .child(content)
+            .into_any_element()
     }
 
     fn render_home_quick_picks(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -10163,98 +12731,14 @@ impl MetrolistShell {
                         ),
                 )
                 .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .children(discoveries.iter().enumerate().map(|(index, item)| {
-                            let play_queue = queue.clone();
-                            let song = &item.recommendation;
-                            v_flex()
-                                .w(px(320.))
-                                .min_w_0()
-                                .gap_3()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .p_3()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(self.render_thumbnail(
-                                            song.thumbnail_url.as_deref(),
-                                            px(56.),
-                                            IconName::Play,
-                                            cx,
-                                        ))
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(
-                                                    div()
-                                                        .font_medium()
-                                                        .overflow_hidden()
-                                                        .child(song.title.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .overflow_hidden()
-                                                        .child(song.artist_line()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .mt_1()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .overflow_hidden()
-                                                        .child(format!(
-                                                            "Because you listen to {}",
-                                                            item.seed.title
-                                                        )),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .flex_wrap()
-                                        .gap_1()
-                                        .justify_end()
-                                        .child(self.download_button(
-                                            format!("download-home-daily-{index}"),
-                                            song,
-                                            cx,
-                                        ))
-                                        .child(self.queue_insert_buttons(
-                                            format!("home-daily-{index}"),
-                                            song,
-                                            cx,
-                                        ))
-                                        .child(
-                                            Button::new(format!("home-daily-{index}-play"))
-                                                .ghost()
-                                                .icon(IconName::Play)
-                                                .label("Play")
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.play_song_collection(
-                                                            play_queue.as_ref().clone(),
-                                                            index,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .into_any_element()
-                        })),
+                    tile_row().children(discoveries.iter().enumerate().map(|(index, item)| {
+                        self.render_song_tile(
+                            format!("home-daily-{index}"),
+                            &item.recommendation,
+                            Some(format!("Because you listen to {}", item.seed.title)),
+                            cx,
+                        )
+                    })),
                 )
                 .into_any_element(),
         )
@@ -10325,93 +12809,16 @@ impl MetrolistShell {
                         ),
                 )
                 .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .children(songs.iter().enumerate().map(|(index, song)| {
-                            let play_queue = queue.clone();
-                            v_flex()
-                                .w(px(300.))
-                                .min_w_0()
-                                .gap_3()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .p_3()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(self.render_thumbnail(
-                                            song.thumbnail_url.as_deref(),
-                                            px(48.),
-                                            IconName::Play,
-                                            cx,
-                                        ))
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(
-                                                    div()
-                                                        .font_medium()
-                                                        .overflow_hidden()
-                                                        .child(song.title.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .overflow_hidden()
-                                                        .child(song.artist_line()),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .flex_wrap()
-                                        .gap_1()
-                                        .justify_end()
-                                        .child(self.download_button(
-                                            format!("download-home-forgotten-{index}"),
-                                            song,
-                                            cx,
-                                        ))
-                                        .child(self.queue_insert_buttons(
-                                            format!("home-forgotten-{index}"),
-                                            song,
-                                            cx,
-                                        ))
-                                        .child(
-                                            Button::new(format!("home-forgotten-{index}-play"))
-                                                .ghost()
-                                                .icon(IconName::Play)
-                                                .label("Play")
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.play_song_collection(
-                                                            play_queue.as_ref().clone(),
-                                                            index,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .into_any_element()
-                        })),
+                    tile_row().children(songs.iter().enumerate().map(|(index, song)| {
+                        self.render_song_tile(format!("home-forgotten-{index}"), song, None, cx)
+                    })),
                 )
                 .into_any_element(),
         )
     }
 
     fn render_home(&self, cx: &mut Context<Self>) -> AnyElement {
-        let recent_songs = Arc::new(self.recent_unique_songs(6));
+        let recent_songs = Arc::new(self.recent_unique_songs(8));
         let recent_content = if recent_songs.is_empty() {
             div()
                 .text_sm()
@@ -10419,89 +12826,15 @@ impl MetrolistShell {
                 .child("Play a song for 30 seconds and it will appear here.")
                 .into_any_element()
         } else {
-            h_flex()
-                .flex_wrap()
-                .gap_3()
+            tile_row()
                 .children(recent_songs.iter().enumerate().map(|(index, song)| {
-                    let songs = recent_songs.clone();
-                    v_flex()
-                        .w(px(300.))
-                        .min_w_0()
-                        .gap_3()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .p_3()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .gap_3()
-                                .items_center()
-                                .child(self.render_thumbnail(
-                                    song.thumbnail_url.as_deref(),
-                                    px(48.),
-                                    IconName::Play,
-                                    cx,
-                                ))
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .font_medium()
-                                                .overflow_hidden()
-                                                .child(song.title.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .overflow_hidden()
-                                                .child(song.artist_line()),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .flex_wrap()
-                                .gap_1()
-                                .justify_end()
-                                .child(self.download_button(
-                                    format!("download-home-recent-{index}"),
-                                    song,
-                                    cx,
-                                ))
-                                .child(self.queue_insert_buttons(
-                                    format!("home-recent-{index}"),
-                                    song,
-                                    cx,
-                                ))
-                                .child(
-                                    Button::new(format!("home-recent-{index}-play"))
-                                        .ghost()
-                                        .icon(IconName::Play)
-                                        .label("Play")
-                                        .tooltip("Play from recent history")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.play_song_collection(
-                                                songs.as_ref().clone(),
-                                                index,
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                ),
-                        )
-                        .into_any_element()
+                    self.render_song_tile(format!("home-recent-{index}"), song, None, cx)
                 }))
                 .into_any_element()
         };
 
         v_flex()
+            .w_full()
             .gap_7()
             .child(self.page_heading(
                 "Good evening",
@@ -10512,40 +12845,21 @@ impl MetrolistShell {
                 layout.child(
                     v_flex()
                         .gap_3()
-                        .child(div().text_lg().font_semibold().child("Continue listening"))
+                        .child(section_heading("Continue listening", None, cx))
                         .child(
-                            h_flex()
-                                .max_w(px(620.))
-                                .gap_4()
-                                .items_center()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .p_5()
-                                .child(
-                                    div()
-                                        .size_12()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(cx.theme().radius)
-                                        .bg(cx.theme().primary)
-                                        .text_color(cx.theme().primary_foreground)
-                                        .child(Icon::new(IconName::Play)),
-                                )
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(div().font_semibold().child(song.title.clone()))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(song.artist_line()),
-                                        ),
-                                )
+                            featured_card_shell(cx)
+                                .child(self.render_thumbnail(
+                                    song.thumbnail_url.as_deref(),
+                                    px(72.),
+                                    IconName::Play,
+                                    cx,
+                                ))
+                                .child(media_text_block(
+                                    song.title.clone(),
+                                    song.artist_line(),
+                                    None,
+                                    cx,
+                                ))
                                 .child(
                                     Button::new("home-continue")
                                         .primary()
@@ -10558,10 +12872,11 @@ impl MetrolistShell {
                         ),
                 )
             })
+            .child(self.render_home_speed_dial(cx))
             .child(
                 v_flex()
                     .gap_3()
-                    .child(div().text_lg().font_semibold().child("Recently played"))
+                    .child(section_heading("Recently played", None, cx))
                     .child(recent_content),
             )
             .when_some(self.render_home_quick_picks(cx), |layout, songs| {
@@ -10710,60 +13025,14 @@ impl MetrolistShell {
                                             },
                                         ),
                                 )
-                                .child(h_flex().flex_wrap().gap_3().children(
+                                .child(tile_row().children(
                                     page.new_release_albums.iter().enumerate().map(
                                         |(index, album)| {
-                                            let selected = album.clone();
-                                            h_flex()
-                                                .w(px(300.))
-                                                .min_w_0()
-                                                .gap_3()
-                                                .items_center()
-                                                .rounded(cx.theme().radius)
-                                                .border_1()
-                                                .border_color(cx.theme().border)
-                                                .bg(cx.theme().secondary)
-                                                .p_3()
-                                                .child(self.render_thumbnail(
-                                                    album.thumbnail_url.as_deref(),
-                                                    px(52.),
-                                                    IconName::BookOpen,
-                                                    cx,
-                                                ))
-                                                .child(
-                                                    v_flex()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .child(
-                                                            div()
-                                                                .font_medium()
-                                                                .overflow_hidden()
-                                                                .child(album.title.clone()),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                )
-                                                                .overflow_hidden()
-                                                                .child(album.subtitle.clone()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    Button::new(format!("explore-album-{index}"))
-                                                        .ghost()
-                                                        .label("Open")
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.open_online_browse(
-                                                                    selected.clone(),
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                )
-                                                .into_any_element()
+                                            self.render_browse_tile(
+                                                format!("explore-album-{index}"),
+                                                album,
+                                                cx,
+                                            )
                                         },
                                     ),
                                 )),
@@ -10794,6 +13063,7 @@ impl MetrolistShell {
         };
 
         v_flex()
+            .w_full()
             .gap_6()
             .child(self.page_heading("Explore", "Discover new releases, moods, and genres.", cx))
             .child(content)
@@ -10884,45 +13154,37 @@ impl MetrolistShell {
         };
         let busy = self.search_history_task.is_some();
         Some(
-            v_flex()
+            GroupBox::new()
+                .id("recent-searches")
+                .fill()
                 .max_w(px(720.))
                 .w_full()
-                .gap_2()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().secondary)
-                .p_3()
-                .when(!entries.is_empty(), |layout| {
-                    layout.child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_medium()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Recent searches"),
+                .title(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Recent searches"),
+                        )
+                        .when(query_is_empty && total_count > 0, |heading| {
+                            heading.child(
+                                Button::new("clear-search-history")
+                                    .ghost()
+                                    .compact()
+                                    .label("Clear all")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.confirm_clear_search_history(total_count, window, cx);
+                                    })),
                             )
-                            .when(query_is_empty && total_count > 0, |heading| {
-                                heading.child(
-                                    Button::new("clear-search-history")
-                                        .ghost()
-                                        .label("Clear all")
-                                        .disabled(busy)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.confirm_clear_search_history(
-                                                total_count,
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                            }),
-                    )
-                })
+                        }),
+                )
                 .when_some(self.search_history_error.clone(), |layout, error| {
                     layout.child(
                         div()
@@ -10938,47 +13200,41 @@ impl MetrolistShell {
                     let submit_query = entry.query.clone();
                     let fill_query = entry.query.clone();
                     let id = entry.id;
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
+                    list_row_shell(SharedString::from(format!("search-history-{index}")), cx)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.apply_search_suggestion(submit_query.clone(), true, window, cx);
+                        }))
+                        .child(Icon::new(IconName::Undo2).size_4())
+                        .child(title_line(entry.query).text_sm())
                         .child(
-                            Button::new(format!("search-history-{index}"))
-                                .ghost()
-                                .flex_1()
-                                .justify_start()
-                                .icon(IconName::Undo2)
-                                .label(entry.query)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.apply_search_suggestion(
-                                        submit_query.clone(),
-                                        true,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("fill-search-history-{index}"))
-                                .ghost()
-                                .label("Fill")
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            icon_ghost_button(
+                                format!("fill-search-history-{index}"),
+                                IconName::ArrowUp,
+                                "Fill search box",
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     this.apply_search_suggestion(
                                         fill_query.clone(),
                                         false,
                                         window,
                                         cx,
                                     );
-                                })),
+                                },
+                            )),
                         )
                         .child(
-                            Button::new(format!("delete-search-history-{index}"))
-                                .ghost()
-                                .label("Delete")
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            icon_ghost_button(
+                                format!("delete-search-history-{index}"),
+                                IconName::Delete,
+                                "Delete this search",
+                            )
+                            .disabled(busy)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.delete_search_history(id, cx);
-                                })),
+                                },
+                            )),
                         )
                 }))
                 .into_any_element(),
@@ -11128,44 +13384,36 @@ impl MetrolistShell {
                     })
                     .children(suggestions.songs.iter().enumerate().map(|(index, song)| {
                         let selected = song.clone();
-                        h_flex()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .p_2()
+                        list_row_shell(
+                            SharedString::from(format!("search-recommendation-{index}")),
+                            cx,
+                        )
                             .child(self.render_thumbnail(
                                 song.thumbnail_url.as_deref(),
                                 px(40.),
                                 IconName::Play,
                                 cx,
                             ))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().text_sm().font_medium().child(song.title.clone()))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .overflow_hidden()
-                                            .child(song.artist_line()),
-                                    ),
-                            )
+                            .child(media_text_block(
+                                song.title.clone(),
+                                song.artist_line(),
+                                None,
+                                cx,
+                            ))
                             .child(self.queue_insert_buttons(
                                 format!("search-recommendation-{index}"),
                                 song,
                                 cx,
                             ))
                             .child(
-                                Button::new(format!("play-search-recommendation-{index}"))
-                                    .ghost()
-                                    .icon(IconName::Play)
-                                    .label("Play")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.play_search_suggestion(selected.clone(), window, cx);
-                                    })),
+                                icon_ghost_button(
+                                    format!("play-search-recommendation-{index}"),
+                                    IconName::Play,
+                                    "Play",
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.play_search_suggestion(selected.clone(), window, cx);
+                                })),
                             )
                     }))
                     .when(!suggestions.items.is_empty(), |layout| {
@@ -11185,31 +13433,22 @@ impl MetrolistShell {
                         } else {
                             IconName::BookOpen
                         };
-                        h_flex()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .p_2()
+                        list_row_shell(
+                            SharedString::from(format!("search-recommendation-page-{index}")),
+                            cx,
+                        )
                             .child(self.render_thumbnail(
                                 item.thumbnail_url.as_deref(),
                                 px(40.),
                                 icon,
                                 cx,
                             ))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().text_sm().font_medium().child(item.title.clone()))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .overflow_hidden()
-                                            .child(item.subtitle.clone()),
-                                    ),
-                            )
+                            .child(media_text_block(
+                                item.title.clone(),
+                                item.subtitle.clone(),
+                                None,
+                                cx,
+                            ))
                             .child(
                                 Button::new(format!("open-search-recommendation-{index}"))
                                     .ghost()
@@ -11325,10 +13564,9 @@ impl MetrolistShell {
                             .mb_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} {}",
+                            .child(search_result_count_label(
                                 result.songs.len(),
-                                self.search_filter.label().to_lowercase()
+                                self.search_filter,
                             )),
                     )
                     .children(
@@ -11350,10 +13588,9 @@ impl MetrolistShell {
                             .mb_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} {}",
+                            .child(search_result_count_label(
                                 result.items.len(),
-                                self.search_filter.label().to_lowercase()
+                                self.search_filter,
                             )),
                     )
                     .children(
@@ -11410,46 +13647,39 @@ impl MetrolistShell {
         )
     }
 
-    fn render_thumbnail(
+    fn render_thumbnail_image(
         &self,
         url: Option<&str>,
-        size: Pixels,
         fallback_icon: IconName,
-        cx: &mut Context<Self>,
+        fill: bool,
     ) -> AnyElement {
         let url = url.map(str::trim).filter(|url| !url.is_empty());
-        let frame = div()
-            .size(size)
-            .flex_shrink_0()
-            .overflow_hidden()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().muted);
         if let Some(image) = url.and_then(|url| self.thumbnail_images.get(url)) {
-            return frame
-                .child(
-                    img(image.clone())
+            let image = img(image.clone())
+                .object_fit(ObjectFit::Cover)
+                .with_loading(|| {
+                    div()
                         .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .with_loading(|| {
-                            div()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::new(IconName::LoaderCircle))
-                                .into_any_element()
-                        })
-                        .with_fallback(|| {
-                            div()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::new(IconName::TriangleAlert))
-                                .into_any_element()
-                        }),
-                )
-                .into_any_element();
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::LoaderCircle))
+                        .into_any_element()
+                })
+                .with_fallback(|| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::TriangleAlert))
+                        .into_any_element()
+                });
+            return if fill {
+                image.size_full().into_any_element()
+            } else {
+                image.into_any_element()
+            };
         }
 
         let placeholder_icon = match url {
@@ -11457,11 +13687,152 @@ impl MetrolistShell {
             Some(url) if self.thumbnail_tasks.contains_key(url) => IconName::LoaderCircle,
             _ => fallback_icon,
         };
-        frame
+        div()
+            .size_full()
             .flex()
             .items_center()
             .justify_center()
             .child(Icon::new(placeholder_icon))
+            .into_any_element()
+    }
+
+    fn render_thumbnail(
+        &self,
+        url: Option<&str>,
+        size: Pixels,
+        fallback_icon: IconName,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size(size)
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .child(self.render_thumbnail_image(url, fallback_icon, true))
+            .into_any_element()
+    }
+
+    fn render_local_playlist_cover_image(
+        &self,
+        custom_url: Option<&str>,
+        preview_urls: &[String],
+    ) -> AnyElement {
+        if custom_url.is_some() || preview_urls.len() <= 1 {
+            return self.render_thumbnail_image(
+                custom_url.or_else(|| preview_urls.first().map(String::as_str)),
+                IconName::BookOpen,
+                true,
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_wrap()
+            .children(preview_urls.iter().take(4).map(|url| {
+                div()
+                    .w(relative(0.5))
+                    .h(relative(0.5))
+                    .overflow_hidden()
+                    .child(self.render_thumbnail_image(Some(url), IconName::BookOpen, true))
+            }))
+            .into_any_element()
+    }
+
+    fn render_local_playlist_thumbnail(
+        &self,
+        custom_url: Option<&str>,
+        preview_urls: &[String],
+        size: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size(size)
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .child(self.render_local_playlist_cover_image(custom_url, preview_urls))
+            .into_any_element()
+    }
+
+    fn render_local_playlist_cover_art(
+        &self,
+        custom_url: Option<&str>,
+        preview_urls: &[String],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        cover_frame(cx)
+            .child(self.render_local_playlist_cover_image(custom_url, preview_urls))
+            .child(cover_play_badge(cx))
+            .into_any_element()
+    }
+
+    fn render_cover_art(
+        &self,
+        url: Option<&str>,
+        fallback_icon: IconName,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        cover_frame(cx)
+            .child(self.render_thumbnail_image(url, fallback_icon, true))
+            .child(cover_play_badge(cx))
+            .into_any_element()
+    }
+
+    fn render_song_tile(
+        &self,
+        id: String,
+        song: &Song,
+        extra: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let play_song = song.clone();
+        media_tile_shell(SharedString::from(format!("song-tile-{id}")), cx)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.play_discovery_song(play_song.clone(), window, cx);
+            }))
+            .child(self.render_cover_art(song.thumbnail_url.as_deref(), IconName::Play, cx))
+            .child(media_text_block(
+                song.title.clone(),
+                song.artist_line(),
+                extra.map(SharedString::from),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(self.download_button(format!("download-{id}"), song, cx))
+                    .child(self.queue_insert_buttons(id, song, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_browse_tile(
+        &self,
+        id: String,
+        item: &BrowseItem,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = item.clone();
+        let icon = if item.kind == BrowseKind::Artist {
+            IconName::User
+        } else {
+            IconName::BookOpen
+        };
+        media_tile_shell(SharedString::from(format!("browse-tile-{id}")), cx)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_online_browse(selected.clone(), cx);
+            }))
+            .child(self.render_cover_art(item.thumbnail_url.as_deref(), icon, cx))
+            .child(media_text_block(
+                item.title.clone(),
+                item.subtitle.clone(),
+                None,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -11477,27 +13848,14 @@ impl MetrolistShell {
         } else {
             IconName::BookOpen
         };
-        h_flex()
-            .w_full()
-            .gap_4()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
+        list_row_shell(SharedString::from(format!("browse-item-{index}")), cx)
             .child(self.render_thumbnail(item.thumbnail_url.as_deref(), px(44.), icon, cx))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_medium().child(item.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(item.subtitle.clone()),
-                    ),
-            )
+            .child(media_text_block(
+                item.title.clone(),
+                item.subtitle.clone(),
+                None,
+                cx,
+            ))
             .child(
                 div()
                     .text_xs()
@@ -11525,32 +13883,19 @@ impl MetrolistShell {
         let unlike_item = item.clone();
         let rename_item = item.clone();
         let delete_item = item.clone();
-        h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
+        list_row_shell(SharedString::from(format!("cloud-playlist-{index}")), cx)
             .child(self.render_thumbnail(
                 item.thumbnail_url.as_deref(),
                 px(44.),
                 IconName::BookOpen,
                 cx,
             ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_medium().child(item.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(item.subtitle.clone()),
-                    ),
-            )
+            .child(media_text_block(
+                item.title.clone(),
+                item.subtitle.clone(),
+                None,
+                cx,
+            ))
             .child(
                 div()
                     .text_xs()
@@ -11606,15 +13951,19 @@ impl MetrolistShell {
         let downloads_ready = matches!(self.downloads_state, StoredViewState::Loaded(_));
         let state = self.download_for(&song.video_id).map(|item| item.state);
         let retry = matches!(state, Some(DownloadState::Paused | DownloadState::Failed));
-        let label = if removing {
-            "Removing…"
+        let (icon, label) = if removing {
+            (IconName::LoaderCircle, "Removing…")
         } else {
             match state {
-                Some(DownloadState::Completed) => "Offline ✓",
-                Some(DownloadState::Queued | DownloadState::Downloading) => "Downloading…",
-                Some(DownloadState::Paused | DownloadState::Failed) => "Resume",
-                None if downloads_ready => "Download",
-                None => "Loading…",
+                Some(DownloadState::Completed) => (IconName::CircleCheck, "Available offline"),
+                Some(DownloadState::Queued | DownloadState::Downloading) => {
+                    (IconName::LoaderCircle, "Downloading…")
+                }
+                Some(DownloadState::Paused | DownloadState::Failed) => {
+                    (IconName::HardDrive, "Resume download")
+                }
+                None if downloads_ready => (IconName::HardDrive, "Download for offline playback"),
+                None => (IconName::LoaderCircle, "Loading downloads…"),
             }
         };
         let disabled = removing
@@ -11625,12 +13974,18 @@ impl MetrolistShell {
             );
         Button::new(id)
             .ghost()
-            .label(label)
-            .tooltip(if song.is_episode {
-                "Keep this episode for offline playback"
-            } else {
-                "Keep this song for offline playback"
-            })
+            .compact()
+            .icon(icon)
+            .selected(matches!(state, Some(DownloadState::Completed)))
+            .tooltip(
+                if song.is_episode && label == "Download for offline playback" {
+                    "Keep this episode for offline playback"
+                } else if !song.is_episode && label == "Download for offline playback" {
+                    "Keep this song for offline playback"
+                } else {
+                    label
+                },
+            )
             .disabled(disabled)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if retry {
@@ -11638,6 +13993,59 @@ impl MetrolistShell {
                 } else {
                     this.queue_song_download(download_song.clone(), cx);
                 }
+            }))
+    }
+
+    fn download_lifecycle_button(&self, id: String, song: &Song, cx: &mut Context<Self>) -> Button {
+        let video_id = song.video_id.clone();
+        let download_song = song.clone();
+        let downloads_ready = matches!(self.downloads_state, StoredViewState::Loaded(_));
+        let state = self
+            .download_for(&song.video_id)
+            .map(|download| download.state);
+        let removing = self.download_removals.contains(&song.video_id);
+        let cancelling = self
+            .active_downloads
+            .get(&song.video_id)
+            .is_some_and(|active| active.cancelled.load(Ordering::Acquire));
+        let (icon, label) = if removing {
+            (IconName::LoaderCircle, "Removing…")
+        } else if cancelling {
+            (IconName::LoaderCircle, "Pausing…")
+        } else {
+            match state {
+                Some(DownloadState::Completed) => (IconName::Delete, "Remove offline"),
+                Some(DownloadState::Queued | DownloadState::Downloading) => {
+                    (IconName::LoaderCircle, "Pause download")
+                }
+                Some(DownloadState::Paused | DownloadState::Failed) => {
+                    (IconName::HardDrive, "Resume download")
+                }
+                None if downloads_ready => (IconName::HardDrive, "Download"),
+                None => (IconName::LoaderCircle, "Loading downloads…"),
+            }
+        };
+
+        Button::new(id)
+            .ghost()
+            .icon(icon)
+            .label(label)
+            .selected(matches!(state, Some(DownloadState::Completed)))
+            .disabled(!downloads_ready || removing || cancelling)
+            .when(matches!(state, Some(DownloadState::Completed)), |button| {
+                button.danger()
+            })
+            .on_click(cx.listener(move |this, _, window, cx| match state {
+                Some(DownloadState::Completed) => {
+                    this.confirm_remove_download(video_id.clone(), window, cx);
+                }
+                Some(DownloadState::Queued | DownloadState::Downloading) => {
+                    this.pause_download(&video_id, cx);
+                }
+                Some(DownloadState::Paused | DownloadState::Failed) => {
+                    this.retry_download(&video_id, cx);
+                }
+                None => this.queue_song_download(download_song.clone(), cx),
             }))
     }
 
@@ -11651,25 +14059,21 @@ impl MetrolistShell {
             "Add this to the end of the queue"
         };
         h_flex()
-            .flex_wrap()
             .gap_1()
+            .flex_shrink_0()
             .child(
-                Button::new(format!("{id}-play-next"))
-                    .ghost()
-                    .icon(IconName::ArrowDown)
-                    .label("Next")
-                    .tooltip("Play this immediately after the current item")
-                    .disabled(guest)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_song_next(next_song.clone(), window, cx);
-                    })),
+                icon_ghost_button(
+                    format!("{id}-play-next"),
+                    IconName::ArrowDown,
+                    "Play this immediately after the current item",
+                )
+                .disabled(guest)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.play_song_next(next_song.clone(), window, cx);
+                })),
             )
             .child(
-                Button::new(format!("{id}-add-queue"))
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .label("Queue")
-                    .tooltip(queue_tooltip)
+                icon_ghost_button(format!("{id}-add-queue"), IconName::Plus, queue_tooltip)
                     .disabled(guest)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.add_song_to_queue(queued_song.clone(), window, cx);
@@ -11678,30 +14082,145 @@ impl MetrolistShell {
             .into_any_element()
     }
 
+    fn render_song_overflow_menu(
+        &self,
+        id: String,
+        song: &Song,
+        play: SongOverflowPlay,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity();
+        let account_ready = self.account_ready() && !song.is_episode;
+        let cloud_liked = self.cloud_video_liked(&song.video_id);
+        let episode_saved = self.is_episode_saved(&song.video_id);
+        Button::new(format!("{id}-more"))
+            .ghost()
+            .compact()
+            .icon(IconName::Ellipsis)
+            .tooltip("More actions")
+            .dropdown_menu({
+                let song = song.clone();
+                let view = view.clone();
+                move |menu, _, _| {
+                    let mut menu = menu
+                        .item(PopupMenuItem::new("Play").on_click({
+                            let view = view.clone();
+                            let play = play.clone();
+                            shell_menu_action(view, move |this, window, cx| match &play {
+                                SongOverflowPlay::SearchResult { index } => {
+                                    this.play_search_result(*index, window, cx);
+                                }
+                                SongOverflowPlay::Collection { songs, index } => {
+                                    this.play_song_collection(
+                                        songs.as_ref().clone(),
+                                        *index,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })
+                        }))
+                        .item(PopupMenuItem::new("Play next").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, window, cx| {
+                                this.play_song_next(song.clone(), window, cx);
+                            })
+                        }))
+                        .item(PopupMenuItem::new("Add to queue").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, window, cx| {
+                                this.add_song_to_queue(song.clone(), window, cx);
+                            })
+                        }))
+                        .separator()
+                        .item(PopupMenuItem::new("Add to playlist").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.open_playlist_picker(song.clone(), cx);
+                            })
+                        }))
+                        .item(PopupMenuItem::new("Download").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.queue_song_download(song.clone(), cx);
+                            })
+                        }));
+                    if song.is_episode {
+                        menu = menu.item(
+                            PopupMenuItem::new(if episode_saved {
+                                "Remove from Later"
+                            } else {
+                                "Save for Later"
+                            })
+                            .on_click({
+                                let view = view.clone();
+                                let song = song.clone();
+                                shell_menu_action(view, move |this, _, cx| {
+                                    this.toggle_episode_for_later(song.clone(), cx);
+                                })
+                            }),
+                        );
+                    }
+                    if account_ready {
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new(if cloud_liked {
+                                    "Unlike on YouTube Music"
+                                } else {
+                                    "Like on YouTube Music"
+                                })
+                                .on_click({
+                                    let view = view.clone();
+                                    let song = song.clone();
+                                    shell_menu_action(view, move |this, _, cx| {
+                                        this.set_cloud_video_liked(song.clone(), !cloud_liked, cx);
+                                    })
+                                }),
+                            )
+                            .item(PopupMenuItem::new("Add to YouTube playlist").on_click({
+                                let view = view.clone();
+                                let song = song.clone();
+                                shell_menu_action(view, move |this, _, cx| {
+                                    this.open_cloud_playlist_picker(song.clone(), cx);
+                                })
+                            }));
+                    }
+                    menu
+                }
+            })
+            .into_any_element()
+    }
+
     fn render_song_row(&self, index: usize, song: &Song, cx: &mut Context<Self>) -> AnyElement {
         let duration = song.duration.map(format_duration).unwrap_or_default();
         let favorite = self.is_favorite(&song.video_id);
         let favorite_song = song.clone();
-        let playlist_song = song.clone();
-        let cloud_liked = self.cloud_video_liked(&song.video_id);
-        let cloud_like_song = song.clone();
-        let cloud_playlist_song = song.clone();
-        let episode_saved = self.is_episode_saved(&song.video_id);
-        let later_song = song.clone();
         let saved_position = self.saved_episode_position(&song.video_id);
+        let more = self.render_song_overflow_menu(
+            format!("search-result-{index}"),
+            song,
+            SongOverflowPlay::SearchResult { index },
+            cx,
+        );
+        let view = cx.entity();
 
-        h_flex()
-            .flex_wrap()
-            .w_full()
-            .gap_4()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
+        list_row_shell(SharedString::from(format!("song-row-{index}")), cx)
+            .on_click({
+                let view = view.clone();
+                move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.play_search_result(index, window, cx);
+                    });
+                }
+            })
             .child(
                 div()
                     .w(px(24.))
+                    .flex_shrink_0()
                     .text_center()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
@@ -11709,116 +14228,59 @@ impl MetrolistShell {
             )
             .child(self.render_thumbnail(
                 song.thumbnail_url.as_deref(),
-                px(44.),
+                px(40.),
                 IconName::Play,
                 cx,
             ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_medium().child(song.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(song.artist_line()),
-                    )
-                    .when_some(saved_position, |details, position| {
-                        details.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Resume at {}", format_duration(position))),
-                        )
-                    }),
-            )
+            .child(media_text_block(
+                song.title.clone(),
+                song.artist_line(),
+                saved_position.map(|position| {
+                    SharedString::from(format!("Resume at {}", format_duration(position)))
+                }),
+                cx,
+            ))
             .child(
                 div()
-                    .w(px(64.))
-                    .text_right()
-                    .text_sm()
+                    .flex_shrink_0()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(duration),
             )
             .child(
-                Button::new(format!("favorite-result-{index}"))
-                    .ghost()
-                    .icon(IconName::Heart)
-                    .selected(favorite)
-                    .disabled(self.library_busy())
-                    .tooltip(if favorite {
+                icon_ghost_button(
+                    format!("favorite-result-{index}"),
+                    IconName::Heart,
+                    if favorite {
                         "Remove from favourites"
                     } else {
                         "Add to favourites"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_favorite(favorite_song.clone(), cx);
-                    })),
+                    },
+                )
+                .selected(favorite)
+                .disabled(self.library_busy())
+                .on_click({
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        });
+                    }
+                }),
             )
             .child(
-                Button::new(format!("playlist-result-{index}"))
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .tooltip("Add to playlist")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_playlist_picker(playlist_song.clone(), cx);
-                    })),
+                icon_ghost_button(format!("play-result-{index}"), IconName::Play, "Play").on_click(
+                    {
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.play_search_result(index, window, cx);
+                            });
+                        }
+                    },
+                ),
             )
-            .when(song.is_episode, |row| {
-                row.child(
-                    Button::new(format!("later-result-{index}"))
-                        .ghost()
-                        .label(if episode_saved { "Saved" } else { "Later" })
-                        .selected(episode_saved)
-                        .tooltip(if episode_saved {
-                            "Remove from Episodes for Later"
-                        } else {
-                            "Save to Episodes for Later"
-                        })
-                        .disabled(self.podcast_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_episode_for_later(later_song.clone(), cx);
-                        })),
-                )
-            })
-            .child(self.download_button(format!("download-result-{index}"), song, cx))
-            .when(self.account_ready() && !song.is_episode, |row| {
-                row.child(
-                    Button::new(format!("cloud-like-result-{index}"))
-                        .ghost()
-                        .label(if cloud_liked { "YT ♥" } else { "YT ♡" })
-                        .tooltip(if cloud_liked {
-                            "Remove from YouTube Music liked songs"
-                        } else {
-                            "Add to YouTube Music liked songs"
-                        })
-                        .disabled(self.cloud_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_cloud_video_liked(cloud_like_song.clone(), !cloud_liked, cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("cloud-playlist-result-{index}"))
-                        .ghost()
-                        .label("YT +")
-                        .tooltip("Add to an editable YouTube Music playlist")
-                        .disabled(self.cloud_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_cloud_playlist_picker(cloud_playlist_song.clone(), cx);
-                        })),
-                )
-            })
-            .child(self.queue_insert_buttons(format!("search-result-{index}"), song, cx))
-            .child(
-                Button::new(format!("play-result-{index}"))
-                    .ghost()
-                    .icon(IconName::Play)
-                    .tooltip("Play")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_search_result(index, window, cx);
-                    })),
-            )
+            .child(more)
             .into_any_element()
     }
 
@@ -11832,25 +14294,31 @@ impl MetrolistShell {
         let duration = song.duration.map(format_duration).unwrap_or_default();
         let favorite = self.is_favorite(&song.video_id);
         let favorite_song = song.clone();
-        let playlist_song = song.clone();
-        let cloud_liked = self.cloud_video_liked(&song.video_id);
-        let cloud_like_song = song.clone();
-        let cloud_playlist_song = song.clone();
-        let episode_saved = self.is_episode_saved(&song.video_id);
-        let later_song = song.clone();
         let saved_position = self.saved_episode_position(&song.video_id);
-        h_flex()
-            .flex_wrap()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
+        let more = self.render_song_overflow_menu(
+            format!("online-song-{index}"),
+            song,
+            SongOverflowPlay::Collection {
+                songs: songs.clone(),
+                index,
+            },
+            cx,
+        );
+        let view = cx.entity();
+        list_row_shell(SharedString::from(format!("online-song-{index}")), cx)
+            .on_click({
+                let view = view.clone();
+                let songs = songs.clone();
+                move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.play_song_collection(songs.as_ref().clone(), index, window, cx);
+                    });
+                }
+            })
             .child(
                 div()
                     .w(px(24.))
+                    .flex_shrink_0()
                     .text_center()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
@@ -11858,116 +14326,65 @@ impl MetrolistShell {
             )
             .child(self.render_thumbnail(
                 song.thumbnail_url.as_deref(),
-                px(44.),
+                px(40.),
                 IconName::Play,
                 cx,
             ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_medium().child(song.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(song.artist_line()),
-                    )
-                    .when_some(saved_position, |details, position| {
-                        details.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Resume at {}", format_duration(position))),
-                        )
-                    }),
-            )
+            .child(media_text_block(
+                song.title.clone(),
+                song.artist_line(),
+                saved_position.map(|position| {
+                    SharedString::from(format!("Resume at {}", format_duration(position)))
+                }),
+                cx,
+            ))
             .child(
                 div()
-                    .w(px(64.))
-                    .text_right()
-                    .text_sm()
+                    .flex_shrink_0()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(duration),
             )
             .child(
-                Button::new(format!("favorite-online-{index}"))
-                    .ghost()
-                    .icon(IconName::Heart)
-                    .selected(favorite)
-                    .disabled(self.library_busy())
-                    .tooltip(if favorite {
+                icon_ghost_button(
+                    format!("favorite-online-{index}"),
+                    IconName::Heart,
+                    if favorite {
                         "Remove from favourites"
                     } else {
                         "Add to favourites"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_favorite(favorite_song.clone(), cx);
-                    })),
+                    },
+                )
+                .selected(favorite)
+                .disabled(self.library_busy())
+                .on_click({
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        });
+                    }
+                }),
             )
             .child(
-                Button::new(format!("playlist-online-{index}"))
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .tooltip("Add to local playlist")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_playlist_picker(playlist_song.clone(), cx);
-                    })),
+                icon_ghost_button(format!("play-online-{index}"), IconName::Play, "Play").on_click(
+                    {
+                        let view = view.clone();
+                        let songs = songs.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.play_song_collection(
+                                    songs.as_ref().clone(),
+                                    index,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    },
+                ),
             )
-            .when(song.is_episode, |row| {
-                row.child(
-                    Button::new(format!("later-online-{index}"))
-                        .ghost()
-                        .label(if episode_saved { "Saved" } else { "Later" })
-                        .selected(episode_saved)
-                        .tooltip(if episode_saved {
-                            "Remove from Episodes for Later"
-                        } else {
-                            "Save to Episodes for Later"
-                        })
-                        .disabled(self.podcast_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_episode_for_later(later_song.clone(), cx);
-                        })),
-                )
-            })
-            .child(self.download_button(format!("download-online-{index}"), song, cx))
-            .when(self.account_ready() && !song.is_episode, |row| {
-                row.child(
-                    Button::new(format!("cloud-like-online-{index}"))
-                        .ghost()
-                        .label(if cloud_liked { "YT ♥" } else { "YT ♡" })
-                        .tooltip(if cloud_liked {
-                            "Remove from YouTube Music liked songs"
-                        } else {
-                            "Add to YouTube Music liked songs"
-                        })
-                        .disabled(self.cloud_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_cloud_video_liked(cloud_like_song.clone(), !cloud_liked, cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("cloud-playlist-online-{index}"))
-                        .ghost()
-                        .label("YT +")
-                        .tooltip("Add to an editable YouTube Music playlist")
-                        .disabled(self.cloud_busy())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_cloud_playlist_picker(cloud_playlist_song.clone(), cx);
-                        })),
-                )
-            })
-            .child(self.queue_insert_buttons(format!("online-song-{index}"), song, cx))
-            .child(
-                Button::new(format!("play-online-{index}"))
-                    .ghost()
-                    .icon(IconName::Play)
-                    .tooltip("Play")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_song_collection(songs.as_ref().clone(), index, window, cx);
-                    })),
-            )
+            .child(more)
             .into_any_element()
     }
 
@@ -11987,120 +14404,103 @@ impl MetrolistShell {
         let cloud_liked = self.cloud_video_liked(&song.video_id);
         let cloud_like_song = song.clone();
         let remove_entry = entry.clone();
-        h_flex()
-            .flex_wrap()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
-            .child(
-                div()
-                    .w(px(24.))
-                    .text_center()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child((index + 1).to_string()),
-            )
-            .child(self.render_thumbnail(
-                song.thumbnail_url.as_deref(),
-                px(44.),
-                IconName::Play,
-                cx,
-            ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_medium().child(song.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(song.artist_line()),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(64.))
-                    .text_right()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(duration),
-            )
-            .child(
-                Button::new(format!("favorite-cloud-editable-{index}"))
-                    .ghost()
-                    .icon(IconName::Heart)
-                    .selected(favorite)
-                    .disabled(self.library_busy())
-                    .tooltip(if favorite {
-                        "Remove from local favourites"
+        list_row_shell(
+            SharedString::from(format!("editable-cloud-song-{index}")),
+            cx,
+        )
+        .child(
+            div()
+                .w(px(24.))
+                .flex_shrink_0()
+                .text_center()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child((index + 1).to_string()),
+        )
+        .child(self.render_thumbnail(song.thumbnail_url.as_deref(), px(44.), IconName::Play, cx))
+        .child(media_text_block(
+            song.title.clone(),
+            song.artist_line(),
+            None,
+            cx,
+        ))
+        .child(
+            div()
+                .w(px(64.))
+                .text_right()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(duration),
+        )
+        .child(
+            Button::new(format!("favorite-cloud-editable-{index}"))
+                .ghost()
+                .icon(IconName::Heart)
+                .selected(favorite)
+                .disabled(self.library_busy())
+                .tooltip(if favorite {
+                    "Remove from local favourites"
+                } else {
+                    "Add to local favourites"
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_favorite(favorite_song.clone(), cx);
+                })),
+        )
+        .child(
+            Button::new(format!("local-playlist-cloud-editable-{index}"))
+                .ghost()
+                .icon(IconName::Plus)
+                .tooltip("Add to local playlist")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_playlist_picker(playlist_song.clone(), cx);
+                })),
+        )
+        .child(self.download_button(format!("download-cloud-editable-{index}"), song, cx))
+        .child(
+            Button::new(format!("cloud-like-editable-{index}"))
+                .ghost()
+                .label(if cloud_liked { "YT ♥" } else { "YT ♡" })
+                .tooltip(if cloud_liked {
+                    "Remove from YouTube Music liked songs"
+                } else {
+                    "Add to YouTube Music liked songs"
+                })
+                .disabled(self.cloud_busy())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_cloud_video_liked(cloud_like_song.clone(), !cloud_liked, cx);
+                })),
+        )
+        .child(
+            Button::new(format!("remove-cloud-playlist-song-{index}"))
+                .danger()
+                .label(
+                    if self.cloud_library_operation == CloudLibraryOperation::RemovingFromPlaylist {
+                        "Removing…"
                     } else {
-                        "Add to local favourites"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_favorite(favorite_song.clone(), cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("local-playlist-cloud-editable-{index}"))
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .tooltip("Add to local playlist")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_playlist_picker(playlist_song.clone(), cx);
-                    })),
-            )
-            .child(self.download_button(format!("download-cloud-editable-{index}"), song, cx))
-            .child(
-                Button::new(format!("cloud-like-editable-{index}"))
-                    .ghost()
-                    .label(if cloud_liked { "YT ♥" } else { "YT ♡" })
-                    .tooltip(if cloud_liked {
-                        "Remove from YouTube Music liked songs"
-                    } else {
-                        "Add to YouTube Music liked songs"
-                    })
-                    .disabled(self.cloud_busy())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_cloud_video_liked(cloud_like_song.clone(), !cloud_liked, cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("remove-cloud-playlist-song-{index}"))
-                    .danger()
-                    .label(
-                        if self.cloud_library_operation
-                            == CloudLibraryOperation::RemovingFromPlaylist
-                        {
-                            "Removing…"
-                        } else {
-                            "Remove"
-                        },
-                    )
-                    .disabled(self.cloud_busy())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.remove_song_from_cloud_playlist(
-                            playlist_id.clone(),
-                            remove_entry.clone(),
-                            cx,
-                        );
-                    })),
-            )
-            .child(self.queue_insert_buttons(format!("cloud-editable-{index}"), song, cx))
-            .child(
-                Button::new(format!("play-cloud-editable-{index}"))
-                    .ghost()
-                    .icon(IconName::Play)
-                    .tooltip("Play")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_song_collection(songs.as_ref().clone(), index, window, cx);
-                    })),
-            )
-            .into_any_element()
+                        "Remove"
+                    },
+                )
+                .disabled(self.cloud_busy())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.remove_song_from_cloud_playlist(
+                        playlist_id.clone(),
+                        remove_entry.clone(),
+                        cx,
+                    );
+                })),
+        )
+        .child(self.queue_insert_buttons(format!("cloud-editable-{index}"), song, cx))
+        .child(
+            Button::new(format!("play-cloud-editable-{index}"))
+                .ghost()
+                .icon(IconName::Play)
+                .tooltip("Play")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.play_song_collection(songs.as_ref().clone(), index, window, cx);
+                })),
+        )
+        .into_any_element()
     }
 
     fn render_online_browse(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -12173,20 +14573,83 @@ impl MetrolistShell {
             }
             BrowseViewState::Loaded(page) => {
                 let is_podcast = page.item.kind == BrowseKind::Podcast;
+                let is_artist = page.item.kind == BrowseKind::Artist;
+                let is_playlist = page.item.kind == BrowseKind::Playlist;
                 let is_collection =
                     matches!(page.item.kind, BrowseKind::Album | BrowseKind::Playlist);
                 let editable_entries = page.item.editable && !page.playlist_entries.is_empty();
-                let songs = Arc::new(if editable_entries {
+                let all_songs = if editable_entries {
                     page.playlist_entries
                         .iter()
                         .map(|entry| entry.song.clone())
                         .collect()
                 } else {
                     page.songs.clone()
+                };
+                let total_song_count = all_songs.len();
+                let podcast_query = if is_podcast {
+                    self.podcast_episode_search_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_owned()
+                } else {
+                    String::new()
+                };
+                let podcast_filter_active = !podcast_query.is_empty();
+                let normalized_podcast_query = podcast_query.to_lowercase();
+                let songs = Arc::new(if podcast_filter_active {
+                    all_songs
+                        .into_iter()
+                        .filter(|song| {
+                            song.title
+                                .to_lowercase()
+                                .contains(&normalized_podcast_query)
+                                || song
+                                    .artist_line()
+                                    .to_lowercase()
+                                    .contains(&normalized_podcast_query)
+                        })
+                        .collect()
+                } else {
+                    all_songs
                 });
+                let filtered_song_count = songs.len();
                 let play_all_songs = songs.clone();
-                let shuffle_songs = songs.clone();
-                let download_songs = songs.clone();
+                let play_all_collection_page = page.clone();
+                let shuffle_collection_page = page.clone();
+                let play_next_collection_page = page.clone();
+                let queue_collection_page = page.clone();
+                let add_playlist_collection_page = page.clone();
+                let download_collection_page = page.clone();
+                let collection_action_busy = self.browse_collection_action.is_some();
+                let browse_endpoint_action_busy =
+                    matches!(self.radio_state, RadioQueueState::Loading(_));
+                let play_all_collection_loading =
+                    self.browse_collection_action == Some(BrowseCollectionAction::PlayAll);
+                let shuffle_collection_loading =
+                    self.browse_collection_action == Some(BrowseCollectionAction::Shuffle);
+                let play_next_collection_loading =
+                    self.browse_collection_action == Some(BrowseCollectionAction::PlayNext);
+                let queue_collection_loading =
+                    self.browse_collection_action == Some(BrowseCollectionAction::AddToQueue);
+                let add_playlist_collection_loading = self.browse_collection_action
+                    == Some(BrowseCollectionAction::AddToLocalPlaylist);
+                let download_collection_loading =
+                    self.browse_collection_action == Some(BrowseCollectionAction::DownloadAll);
+                let collection_has_tracks = !songs.is_empty() || page.continuation.is_some();
+                let collection_playback_action_disabled = self.listen_together_is_guest()
+                    || collection_action_busy
+                    || browse_endpoint_action_busy
+                    || !collection_has_tracks;
+                let collection_shuffle_action_disabled = self.listen_together_is_guest()
+                    || collection_action_busy
+                    || browse_endpoint_action_busy
+                    || (songs.len() < 2 && page.continuation.is_none());
+                let collection_download_action_disabled =
+                    collection_action_busy || browse_endpoint_action_busy || !collection_has_tracks;
+                let collection_local_playlist_action_disabled =
+                    collection_download_action_disabled || self.library_busy();
                 let pagination = self.render_browse_pagination(page.continuation.is_some(), cx);
                 let tracks =
                     if songs.is_empty()
@@ -12202,10 +14665,12 @@ impl MetrolistShell {
                             .p_5()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(if is_podcast {
-                                "This podcast has no playable episodes yet."
+                            .child(if is_podcast && podcast_filter_active {
+                                format!("No episodes match “{podcast_query}”.")
+                            } else if is_podcast {
+                                "This podcast has no playable episodes yet.".into()
                             } else {
-                                "This page has no playable tracks yet."
+                                "This page has no playable tracks yet.".into()
                             })
                             .into_any_element()
                     } else if editable_entries {
@@ -12250,6 +14715,101 @@ impl MetrolistShell {
                         )
                         .into_any_element()
                 });
+                let artist_section_index_offset = page.related.len();
+                let artist_sections = (is_artist && !page.section_links.is_empty()).then(|| {
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_semibold()
+                                .child("View all artist sections"),
+                        )
+                        .children(page.section_links.iter().enumerate().map(|(index, item)| {
+                            self.render_browse_item_row(
+                                artist_section_index_offset + index,
+                                item,
+                                cx,
+                            )
+                        }))
+                        .into_any_element()
+                });
+                let artist_about_metadata = [
+                    page.subscriber_count.clone(),
+                    page.monthly_listener_count.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                let artist_about = (is_artist
+                    && (!artist_about_metadata.is_empty() || page.description.is_some()))
+                .then(|| {
+                    v_flex()
+                        .max_w(px(820.))
+                        .gap_2()
+                        .child(div().text_lg().font_semibold().child("About artist"))
+                        .when(!artist_about_metadata.is_empty(), |about| {
+                            about.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(artist_about_metadata),
+                            )
+                        })
+                        .when_some(page.description.clone(), |about, description| {
+                            about.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(description),
+                            )
+                        })
+                        .into_any_element()
+                });
+                let non_artist_description =
+                    (!is_artist).then(|| page.description.clone()).flatten();
+                let creator_index_offset = page.related.len() + page.section_links.len();
+                let creator_links = (!page.creator_links.is_empty()).then(|| {
+                    v_flex()
+                        .gap_3()
+                        .child(div().text_lg().font_semibold().child(if is_playlist {
+                            "Playlist creator"
+                        } else {
+                            "Album artists"
+                        }))
+                        .children(page.creator_links.iter().enumerate().map(|(index, item)| {
+                            self.render_browse_item_row(creator_index_offset + index, item, cx)
+                        }))
+                        .into_any_element()
+                });
+                let browse_link = match page.item.kind {
+                    BrowseKind::Playlist => {
+                        let playlist_id = page
+                            .item
+                            .browse_id
+                            .strip_prefix("VL")
+                            .unwrap_or(&page.item.browse_id)
+                            .trim();
+                        (!playlist_id.is_empty()).then(|| {
+                            format!("https://music.youtube.com/playlist?list={playlist_id}")
+                        })
+                    }
+                    BrowseKind::Album => page
+                        .playlist_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|playlist_id| !playlist_id.is_empty())
+                        .map(|playlist_id| {
+                            format!("https://music.youtube.com/playlist?list={playlist_id}")
+                        }),
+                    BrowseKind::Artist => {
+                        let browse_id = page.item.browse_id.trim();
+                        (!browse_id.is_empty())
+                            .then(|| format!("https://music.youtube.com/channel/{browse_id}"))
+                    }
+                    BrowseKind::Podcast | BrowseKind::Category => None,
+                };
                 let playlist_liked = self.cloud_playlist_liked(&page.item.browse_id);
                 let like_item = page.item.clone();
                 let album_liked = self.cloud_album_liked(&page.item.browse_id);
@@ -12258,11 +14818,57 @@ impl MetrolistShell {
                 let rename_item = page.item.clone();
                 let delete_item = page.item.clone();
                 let subscription = page.channel_subscription.clone();
+                let browse_title = page.item.title.clone();
+                let speed_dial_browse_item = page.item.clone();
+                let speed_dial_browse_pinned = self.is_speed_dial_browse_item(&page.item);
+                let speed_dial_browse_busy_key =
+                    format!("browse:{}:{}", page.item.kind.label(), page.item.browse_id);
+                let speed_dial_browse_busy =
+                    self.speed_dial_busy.as_deref() == Some(speed_dial_browse_busy_key.as_str());
+                let speed_dial_browse_available = page.item.kind != BrowseKind::Category;
+                let browse_radio_endpoint = page.radio_endpoint.clone();
+                let browse_shuffle_endpoint = page.shuffle_endpoint.clone();
+                let has_browse_shuffle_endpoint = browse_shuffle_endpoint.is_some();
+                let (browse_radio_loading, browse_radio_error) = browse_radio_endpoint
+                    .as_ref()
+                    .map(|endpoint| browse_playback_endpoint_status(&self.radio_state, endpoint))
+                    .unwrap_or_default();
+                let (browse_shuffle_loading, browse_shuffle_error) = browse_shuffle_endpoint
+                    .as_ref()
+                    .map(|endpoint| browse_playback_endpoint_status(&self.radio_state, endpoint))
+                    .unwrap_or_default();
+                let browse_playback_error = browse_radio_error
+                    .map(|message| format!("Radio: {message}"))
+                    .or_else(|| browse_shuffle_error.map(|message| format!("Shuffle: {message}")));
+                let browse_playback_busy = browse_endpoint_action_busy;
+                let browse_playback_disabled = self.listen_together_is_guest()
+                    || browse_playback_busy
+                    || collection_action_busy;
                 let podcast_item = page.item.clone();
                 let podcast_saved = self.is_podcast_saved(&page.item.browse_id);
                 let podcast_channel_id = subscription
                     .as_ref()
                     .map(|subscription| subscription.channel_id.clone());
+                let podcast_channel_item = podcast_channel_id.as_ref().map(|channel_id| {
+                    let title = page
+                        .item
+                        .subtitle
+                        .split(" · ")
+                        .next()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or("Podcast channel")
+                        .to_owned();
+                    BrowseItem {
+                        browse_id: channel_id.clone(),
+                        kind: BrowseKind::Artist,
+                        title,
+                        subtitle: "Podcast channel".into(),
+                        thumbnail_url: None,
+                        params: None,
+                        editable: false,
+                    }
+                });
 
                 v_flex()
                     .gap_6()
@@ -12303,6 +14909,29 @@ impl MetrolistShell {
                                 .child(message),
                         )
                     })
+                    .when_some(browse_playback_error, |layout, message| {
+                        layout.child(
+                            div()
+                                .rounded(cx.theme().radius)
+                                .bg(cx.theme().danger.opacity(0.12))
+                                .text_color(cx.theme().danger)
+                                .p_3()
+                                .child(message),
+                        )
+                    })
+                    .when_some(
+                        self.browse_collection_action_error.clone(),
+                        |layout, message| {
+                            layout.child(
+                                div()
+                                    .rounded(cx.theme().radius)
+                                    .bg(cx.theme().danger.opacity(0.12))
+                                    .text_color(cx.theme().danger)
+                                    .p_3()
+                                    .child(message),
+                            )
+                        },
+                    )
                     .child(
                         h_flex()
                             .gap_5()
@@ -12348,27 +14977,130 @@ impl MetrolistShell {
                                         Button::new("play-online-page")
                                             .primary()
                                             .icon(IconName::Play)
-                                            .label("Play all")
-                                            .disabled(songs.is_empty())
+                                            .label(
+                                                if is_collection && play_all_collection_loading {
+                                                    "Loading all…"
+                                                } else {
+                                                    "Play all"
+                                                },
+                                            )
+                                            .loading(
+                                                is_collection && play_all_collection_loading,
+                                            )
+                                            .disabled(if is_collection {
+                                                collection_playback_action_disabled
+                                            } else {
+                                                songs.is_empty()
+                                            })
                                             .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.play_song_collection(
-                                                    play_all_songs.as_ref().clone(),
-                                                    0,
-                                                    window,
-                                                    cx,
-                                                );
+                                                if is_collection {
+                                                    this.start_browse_collection_action(
+                                                        BrowseCollectionAction::PlayAll,
+                                                        play_all_collection_page.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.play_song_collection(
+                                                        play_all_songs.as_ref().clone(),
+                                                        0,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
                                             })),
                                     )
                                     .when(is_collection, |actions| {
                                         actions
+                                            .when(
+                                                !is_playlist || !has_browse_shuffle_endpoint,
+                                                |actions| {
+                                                    actions.child(
+                                                        Button::new("shuffle-online-page")
+                                                            .label(if shuffle_collection_loading {
+                                                                "Loading all…"
+                                                            } else {
+                                                                "Shuffle"
+                                                            })
+                                                            .loading(shuffle_collection_loading)
+                                                            .disabled(
+                                                                collection_shuffle_action_disabled,
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.start_browse_collection_action(
+                                                                        BrowseCollectionAction::Shuffle,
+                                                                        shuffle_collection_page
+                                                                            .clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                },
+                                            )
                                             .child(
-                                                Button::new("shuffle-online-page")
-                                                    .label("Shuffle")
-                                                    .disabled(shuffle_songs.len() < 2)
+                                                Button::new("play-next-online-collection")
+                                                    .label(if play_next_collection_loading {
+                                                        "Loading all…"
+                                                    } else {
+                                                        "Play next all"
+                                                    })
+                                                    .loading(play_next_collection_loading)
+                                                    .disabled(
+                                                        collection_playback_action_disabled,
+                                                    )
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
-                                                            this.play_shuffled_collection(
-                                                                shuffle_songs.as_ref().clone(),
+                                                            this.start_browse_collection_action(
+                                                                BrowseCollectionAction::PlayNext,
+                                                                play_next_collection_page.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("queue-online-collection")
+                                                    .label(if queue_collection_loading {
+                                                        "Loading all…"
+                                                    } else {
+                                                        "Queue all"
+                                                    })
+                                                    .loading(queue_collection_loading)
+                                                    .disabled(
+                                                        collection_playback_action_disabled,
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.start_browse_collection_action(
+                                                                BrowseCollectionAction::AddToQueue,
+                                                                queue_collection_page.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("add-playlist-online-collection")
+                                                    .label(if add_playlist_collection_loading {
+                                                        "Loading all…"
+                                                    } else {
+                                                        "Add all to playlist"
+                                                    })
+                                                    .loading(add_playlist_collection_loading)
+                                                    .disabled(
+                                                        collection_local_playlist_action_disabled,
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.start_browse_collection_action(
+                                                                BrowseCollectionAction::AddToLocalPlaylist,
+                                                                add_playlist_collection_page
+                                                                    .clone(),
                                                                 window,
                                                                 cx,
                                                             );
@@ -12377,37 +15109,168 @@ impl MetrolistShell {
                                             )
                                             .child(
                                                 Button::new("download-online-page")
-                                                    .label("Download all")
-                                                    .disabled(download_songs.is_empty())
+                                                    .label(if download_collection_loading {
+                                                        "Loading all…"
+                                                    } else {
+                                                        "Download all"
+                                                    })
+                                                    .loading(download_collection_loading)
+                                                    .disabled(
+                                                        collection_download_action_disabled,
+                                                    )
                                                     .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            for song in
-                                                                download_songs.iter().cloned()
-                                                            {
-                                                                this.queue_song_download(song, cx);
-                                                            }
+                                                        move |this, _, window, cx| {
+                                                            this.start_browse_collection_action(
+                                                                BrowseCollectionAction::DownloadAll,
+                                                                download_collection_page.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
                                                         },
                                                     )),
                                             )
                                     })
-                                    .when(is_podcast, |actions| {
+                                    .when(is_artist || is_playlist, |actions| {
+                                        let radio_title = browse_title.clone();
+                                        let shuffle_title = browse_title.clone();
+                                        actions
+                                            .when_some(
+                                                browse_radio_endpoint,
+                                                |actions, endpoint| {
+                                                    actions.child(
+                                                        Button::new("radio-online-page-endpoint")
+                                                            .label(if browse_radio_loading {
+                                                                "Starting radio…"
+                                                            } else {
+                                                                "Radio"
+                                                            })
+                                                            .loading(browse_radio_loading)
+                                                            .disabled(browse_playback_disabled)
+                                                            .on_click(cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.start_browse_playback_endpoint(
+                                                                        endpoint.clone(),
+                                                                        format!(
+                                                                            "{radio_title} Radio"
+                                                                        ),
+                                                                        false,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                },
+                                            )
+                                            .when_some(
+                                                browse_shuffle_endpoint,
+                                                |actions, endpoint| {
+                                                    actions.child(
+                                                        Button::new(
+                                                            "shuffle-online-page-endpoint",
+                                                        )
+                                                            .label(if browse_shuffle_loading {
+                                                                "Shuffling…"
+                                                            } else {
+                                                                "Shuffle"
+                                                            })
+                                                            .loading(browse_shuffle_loading)
+                                                            .disabled(browse_playback_disabled)
+                                                            .on_click(cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.start_browse_playback_endpoint(
+                                                                        endpoint.clone(),
+                                                                        format!(
+                                                                            "{shuffle_title} Shuffle"
+                                                                        ),
+                                                                        true,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                },
+                                            )
+                                    })
+                                    .when_some(browse_link, |actions, link| {
                                         actions.child(
-                                            Button::new("save-online-podcast")
-                                                .label(if podcast_saved {
-                                                    "Remove podcast"
-                                                } else {
-                                                    "Save podcast"
-                                                })
-                                                .selected(podcast_saved)
-                                                .disabled(self.podcast_busy())
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.toggle_podcast_subscription(
-                                                        podcast_item.clone(),
-                                                        podcast_channel_id.clone(),
-                                                        cx,
+                                            Button::new("copy-online-browse-link")
+                                                .label("Copy link")
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(link.clone()),
                                                     );
                                                 })),
                                         )
+                                    })
+                                    .when(speed_dial_browse_available, |actions| {
+                                        actions.child(
+                                            Button::new("pin-online-browse-speed-dial")
+                                                .label(if speed_dial_browse_busy {
+                                                    if speed_dial_browse_pinned {
+                                                        "Removing…"
+                                                    } else {
+                                                        "Pinning…"
+                                                    }
+                                                } else if speed_dial_browse_pinned {
+                                                    "Unpin"
+                                                } else {
+                                                    "Pin to Speed Dial"
+                                                })
+                                                .selected(speed_dial_browse_pinned)
+                                                .disabled(
+                                                    self.speed_dial_busy.is_some()
+                                                        || !matches!(
+                                                            &self.speed_dial_browse_state,
+                                                            StoredViewState::Loaded(_)
+                                                        ),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.toggle_speed_dial_browse_item(
+                                                            speed_dial_browse_item.clone(),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .when(is_podcast, |actions| {
+                                        actions
+                                            .child(
+                                                Button::new("save-online-podcast")
+                                                    .label(if podcast_saved {
+                                                        "Remove podcast"
+                                                    } else {
+                                                        "Save podcast"
+                                                    })
+                                                    .selected(podcast_saved)
+                                                    .disabled(self.podcast_busy())
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.toggle_podcast_subscription(
+                                                                podcast_item.clone(),
+                                                                podcast_channel_id.clone(),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .when_some(podcast_channel_item, |actions, channel| {
+                                                actions.child(
+                                                    Button::new("open-podcast-channel")
+                                                        .label("View channel")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.open_online_browse(
+                                                                    channel.clone(),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                )
+                                            })
                                     })
                                     .when(
                                         self.account_ready()
@@ -12525,7 +15388,55 @@ impl MetrolistShell {
                                     ),
                             ),
                     )
-                    .when_some(page.description.clone(), |layout, description| {
+                    .when(is_podcast, |layout| {
+                        layout.child(
+                            v_flex()
+                                .max_w(px(680.))
+                                .gap_2()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .child(Input::new(
+                                                    &self.podcast_episode_search_input,
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new("clear-podcast-episode-search")
+                                                .ghost()
+                                                .label("Clear")
+                                                .disabled(!podcast_filter_active)
+                                                .on_click(cx.listener(
+                                                    |this, _, window, cx| {
+                                                        this.podcast_episode_search_input.update(
+                                                            cx,
+                                                            |input, cx| {
+                                                                input.set_value("", window, cx);
+                                                            },
+                                                        );
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if podcast_filter_active {
+                                            format!(
+                                                "{filtered_song_count} of {total_song_count} episodes"
+                                            )
+                                        } else {
+                                            format!("{total_song_count} episodes")
+                                        }),
+                                ),
+                        )
+                    })
+                    .when_some(artist_about, |layout, about| layout.child(about))
+                    .when_some(non_artist_description, |layout, description| {
                         layout.child(
                             div()
                                 .max_w(px(820.))
@@ -12534,6 +15445,8 @@ impl MetrolistShell {
                                 .child(description),
                         )
                     })
+                    .when_some(creator_links, |layout, creators| layout.child(creators))
+                    .when_some(artist_sections, |layout, sections| layout.child(sections))
                     .child(
                         v_flex()
                             .gap_3()
@@ -12908,7 +15821,12 @@ impl MetrolistShell {
                                     .border_1()
                                     .border_color(cx.theme().border)
                                     .p_3()
-                                    .child(Icon::new(IconName::BookOpen))
+                                    .child(self.render_local_playlist_thumbnail(
+                                        playlist.thumbnail_url.as_deref(),
+                                        &playlist.preview_thumbnail_urls,
+                                        px(44.),
+                                        cx,
+                                    ))
                                     .child(
                                         v_flex()
                                             .flex_1()
@@ -12936,8 +15854,8 @@ impl MetrolistShell {
                                         .ghost()
                                         .label("Open")
                                         .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.open_playlist(selected.clone(), cx);
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.open_playlist(selected.clone(), window, cx);
                                             }),
                                         ),
                                     )
@@ -12973,41 +15891,58 @@ impl MetrolistShell {
         let is_loading = self.search_source == SearchSource::Online
             && matches!(self.search_state, SearchViewState::Loading);
         let query_is_empty = self.model.search_query().trim().is_empty();
-        let filters = match self.search_source {
-            SearchSource::Online => h_flex()
-                .gap_2()
-                .flex_wrap()
-                .children(SearchFilter::ALL.into_iter().map(|filter| {
-                    Button::new(format!("search-filter-{}", filter.label().to_lowercase()))
-                        .label(filter.label())
-                        .selected(self.search_filter == filter)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_search_filter(filter, window, cx);
-                        }))
+        let online = self.search_source == SearchSource::Online;
+        let filters = if online {
+            let selected = SearchFilter::ALL
+                .iter()
+                .position(|filter| *filter == self.search_filter)
+                .unwrap_or_default();
+            TabBar::new("search-filters")
+                .w_full()
+                .pill()
+                .small()
+                .menu(true)
+                .selected_index(selected)
+                .on_click(cx.listener(|this, index: &usize, window, cx| {
+                    if let Some(filter) = SearchFilter::ALL.get(*index).copied() {
+                        this.select_search_filter(filter, window, cx);
+                    }
                 }))
-                .into_any_element(),
-            SearchSource::Local => h_flex()
-                .gap_2()
-                .flex_wrap()
-                .children(LocalSearchFilter::ALL.into_iter().map(|filter| {
-                    Button::new(format!(
-                        "local-search-filter-{}",
-                        filter.label().to_lowercase()
-                    ))
-                    .label(filter.label())
-                    .selected(self.local_search_filter == filter)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                .children(
+                    SearchFilter::ALL
+                        .into_iter()
+                        .map(|filter| Tab::new().label(filter.label())),
+                )
+                .into_any_element()
+        } else {
+            let selected = LocalSearchFilter::ALL
+                .iter()
+                .position(|filter| *filter == self.local_search_filter)
+                .unwrap_or_default();
+            TabBar::new("local-search-filters")
+                .w_full()
+                .pill()
+                .small()
+                .menu(true)
+                .selected_index(selected)
+                .on_click(cx.listener(|this, index: &usize, _, cx| {
+                    if let Some(filter) = LocalSearchFilter::ALL.get(*index).copied() {
                         this.select_local_search_filter(filter, cx);
-                    }))
+                    }
                 }))
-                .into_any_element(),
+                .children(
+                    LocalSearchFilter::ALL
+                        .into_iter()
+                        .map(|filter| Tab::new().label(filter.label())),
+                )
+                .into_any_element()
         };
 
         v_flex()
-            .gap_6()
+            .gap_5()
             .child(self.page_heading(
                 "Search",
-                if self.search_source == SearchSource::Online {
+                if online {
                     "Find songs, albums, artists, playlists, podcasts, and episodes on YouTube Music."
                 } else {
                     "Search songs, albums, artists, and playlists already known to this device."
@@ -13015,49 +15950,42 @@ impl MetrolistShell {
                 cx,
             ))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("search-source-online")
-                            .icon(IconName::Search)
-                            .label("YouTube Music")
-                            .selected(self.search_source == SearchSource::Online)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select_search_source(SearchSource::Online, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("search-source-local")
-                            .icon(IconName::BookOpen)
-                            .label("On this device")
-                            .selected(self.search_source == SearchSource::Local)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select_search_source(SearchSource::Local, window, cx);
-                            })),
-                    ),
+                h_flex().child(
+                    TabBar::new("search-source")
+                        .segmented()
+                        .selected_index(if online { 0 } else { 1 })
+                        .on_click(cx.listener(|this, index: &usize, window, cx| {
+                            this.select_search_source(
+                                if *index == 0 {
+                                    SearchSource::Online
+                                } else {
+                                    SearchSource::Local
+                                },
+                                window,
+                                cx,
+                            );
+                        }))
+                        .child(Tab::new().label("YouTube Music"))
+                        .child(Tab::new().label("On this device")),
+                ),
             )
             .child(filters)
             .child(
-                h_flex()
-                    .gap_3()
+                Input::new(&self.search_input)
                     .max_w(px(720.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.search_input).prefix(IconName::Search)),
-                    )
-                    .child(
+                    .prefix(IconName::Search)
+                    .suffix(
                         Button::new("submit-search")
-                            .primary()
-                            .label(if self.search_source == SearchSource::Online {
-                                "Search online"
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Search)
+                            .tooltip(if online {
+                                "Search YouTube Music"
                             } else {
-                                "Search device"
+                                "Search this device"
                             })
                             .loading(is_loading)
-                            .disabled(
-                                self.search_source == SearchSource::Online && query_is_empty,
-                            )
+                            .disabled(online && query_is_empty)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.start_search(window, cx)),
                             ),
@@ -13081,6 +16009,25 @@ impl MetrolistShell {
             .into_any_element()
     }
 
+    fn render_stats_metric_card(
+        &self,
+        label: &'static str,
+        value: impl Into<SharedString>,
+        cx: &App,
+    ) -> impl IntoElement {
+        GroupBox::new()
+            .fill()
+            .flex_1()
+            .min_w(px(160.))
+            .title(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(div().text_2xl().font_semibold().child(value.into()))
+    }
+
     fn render_stats_song_row(
         &self,
         index: usize,
@@ -13088,20 +16035,37 @@ impl MetrolistShell {
         songs: Arc<Vec<Song>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let play_songs = songs;
-        let song = entry.song.clone();
-        h_flex()
-            .flex_wrap()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
+        let favorite = self.is_favorite(&entry.song.video_id);
+        let favorite_song = entry.song.clone();
+        let is_current = self
+            .current_song
+            .as_ref()
+            .is_some_and(|current| current.video_id == entry.song.video_id);
+        let more = self.render_song_overflow_menu(
+            format!("stats-song-{index}"),
+            &entry.song,
+            SongOverflowPlay::Collection {
+                songs: songs.clone(),
+                index,
+            },
+            cx,
+        );
+        let view = cx.entity();
+        list_row_shell(SharedString::from(format!("stats-song-{index}")), cx)
+            .when(is_current, |row| row.bg(cx.theme().secondary))
+            .on_click({
+                let view = view.clone();
+                let songs = songs.clone();
+                move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.play_song_collection(songs.as_ref().clone(), index, window, cx);
+                    });
+                }
+            })
             .child(
                 div()
                     .w(px(28.))
+                    .flex_shrink_0()
                     .text_center()
                     .font_semibold()
                     .text_color(cx.theme().muted_foreground)
@@ -13109,58 +16073,64 @@ impl MetrolistShell {
             )
             .child(self.render_thumbnail(
                 entry.song.thumbnail_url.as_deref(),
-                px(48.),
+                px(40.),
                 IconName::Play,
                 cx,
             ))
+            .child(media_text_block(
+                entry.song.title.clone(),
+                entry.song.artist_line(),
+                Some(SharedString::from(format!(
+                    "{} play{} · {} listened{}",
+                    entry.play_count,
+                    if entry.play_count == 1 { "" } else { "s" },
+                    format_duration(entry.play_time),
+                    if entry.song.is_episode {
+                        " · Episode"
+                    } else {
+                        ""
+                    }
+                ))),
+                cx,
+            ))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(200.))
-                    .child(div().font_medium().child(entry.song.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(entry.song.artist_line()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} play{} · {} listened",
-                                entry.play_count,
-                                if entry.play_count == 1 { "" } else { "s" },
-                                format_duration(entry.play_time)
-                            )),
-                    ),
-            )
-            .child(self.queue_insert_buttons(format!("stats-song-{index}"), &entry.song, cx))
-            .child(self.download_button(format!("download-stats-song-{index}"), &entry.song, cx))
-            .child(
-                Button::new(format!("play-stats-song-{index}"))
-                    .primary()
-                    .icon(IconName::Play)
-                    .label("Play")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_song_collection(play_songs.as_ref().clone(), index, window, cx);
-                    })),
-            )
-            .when(entry.song.is_episode, |row| {
-                row.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Episode"),
+                icon_ghost_button(
+                    format!("favorite-stats-song-{index}"),
+                    IconName::Heart,
+                    if favorite {
+                        "Remove from favourites"
+                    } else {
+                        "Add to favourites"
+                    },
                 )
-            })
-            .when(
-                self.current_song
-                    .as_ref()
-                    .is_some_and(|current| current.video_id == song.video_id),
-                |row| row.bg(cx.theme().secondary),
+                .selected(favorite)
+                .disabled(self.library_busy())
+                .on_click({
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        });
+                    }
+                }),
             )
+            .child(
+                icon_ghost_button(format!("play-stats-song-{index}"), IconName::Play, "Play")
+                    .on_click({
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.play_song_collection(
+                                    songs.as_ref().clone(),
+                                    index,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+            )
+            .child(more)
             .into_any_element()
     }
 
@@ -13228,72 +16198,26 @@ impl MetrolistShell {
                         h_flex()
                             .flex_wrap()
                             .gap_3()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w(px(150.))
-                                    .rounded(cx.theme().radius_lg)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_4()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Listening time"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_2xl()
-                                            .font_semibold()
-                                            .child(format_duration(stats.play_time)),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w(px(150.))
-                                    .rounded(cx.theme().radius_lg)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_4()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Recorded plays"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_2xl()
-                                            .font_semibold()
-                                            .child(stats.play_count.to_string()),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w(px(150.))
-                                    .rounded(cx.theme().radius_lg)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .p_4()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Unique songs / artists / albums"),
-                                    )
-                                    .child(div().text_2xl().font_semibold().child(format!(
-                                        "{} / {} / {}",
-                                        stats.unique_songs,
-                                        stats.unique_artists,
-                                        stats.unique_albums
-                                    ))),
-                            ),
+                            .child(self.render_stats_metric_card(
+                                "Listening time",
+                                format_duration(stats.play_time),
+                                cx,
+                            ))
+                            .child(self.render_stats_metric_card(
+                                "Recorded plays",
+                                stats.play_count.to_string(),
+                                cx,
+                            ))
+                            .child(self.render_stats_metric_card(
+                                "Unique songs / artists / albums",
+                                format!(
+                                    "{} / {} / {}",
+                                    stats.unique_songs,
+                                    stats.unique_artists,
+                                    stats.unique_albums
+                                ),
+                                cx,
+                            )),
                     )
                     .child(
                         h_flex()
@@ -13373,59 +16297,43 @@ impl MetrolistShell {
                                         params: None,
                                         editable: false,
                                     });
-                                    h_flex()
-                                        .w_full()
-                                        .gap_3()
-                                        .items_center()
-                                        .rounded(cx.theme().radius)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .p_3()
-                                        .child(
-                                            div()
-                                                .w(px(28.))
-                                                .text_center()
-                                                .font_semibold()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child((index + 1).to_string()),
-                                        )
-                                        .child(Icon::new(IconName::User))
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .child(
-                                                    div().font_medium().child(artist.name.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(format!(
-                                                            "{} play{} · {} listened",
-                                                            artist.play_count,
-                                                            if artist.play_count == 1 {
-                                                                ""
-                                                            } else {
-                                                                "s"
-                                                            },
-                                                            format_duration(artist.play_time)
-                                                        )),
-                                                ),
-                                        )
-                                        .when_some(browse_item, |row, item| {
-                                            row.child(
-                                                Button::new(format!("open-stats-artist-{index}"))
-                                                    .label("Open")
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.open_online_browse(
-                                                                item.clone(),
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                                    list_row_shell(
+                                        SharedString::from(format!("stats-artist-{index}")),
+                                        cx,
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(28.))
+                                            .flex_shrink_0()
+                                            .text_center()
+                                            .font_semibold()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child((index + 1).to_string()),
+                                    )
+                                    .child(Icon::new(IconName::User))
+                                    .child(media_text_block(
+                                        artist.name.clone(),
+                                        format!(
+                                            "{} play{} · {} listened",
+                                            artist.play_count,
+                                            if artist.play_count == 1 { "" } else { "s" },
+                                            format_duration(artist.play_time)
+                                        ),
+                                        None,
+                                        cx,
+                                    ))
+                                    .when_some(browse_item, |row, item| {
+                                        row.child(
+                                            icon_ghost_button(
+                                                format!("open-stats-artist-{index}"),
+                                                IconName::ArrowRight,
+                                                "Open artist",
                                             )
-                                        })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_online_browse(item.clone(), cx);
+                                            })),
+                                        )
+                                    })
                                 },
                             ))
                     })
@@ -13453,60 +16361,46 @@ impl MetrolistShell {
                                         params: None,
                                         editable: false,
                                     };
-                                    h_flex()
-                                        .w_full()
-                                        .gap_3()
-                                        .items_center()
-                                        .rounded(cx.theme().radius)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .p_3()
-                                        .child(
-                                            div()
-                                                .w(px(28.))
-                                                .text_center()
-                                                .font_semibold()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child((index + 1).to_string()),
+                                    list_row_shell(
+                                        SharedString::from(format!("stats-album-{index}")),
+                                        cx,
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(28.))
+                                            .flex_shrink_0()
+                                            .text_center()
+                                            .font_semibold()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child((index + 1).to_string()),
+                                    )
+                                    .child(self.render_thumbnail(
+                                        album.thumbnail_url.as_deref(),
+                                        px(40.),
+                                        IconName::BookOpen,
+                                        cx,
+                                    ))
+                                    .child(media_text_block(
+                                        album.title.clone(),
+                                        format!(
+                                            "{} play{} · {} listened",
+                                            album.play_count,
+                                            if album.play_count == 1 { "" } else { "s" },
+                                            format_duration(album.play_time)
+                                        ),
+                                        None,
+                                        cx,
+                                    ))
+                                    .child(
+                                        icon_ghost_button(
+                                            format!("open-stats-album-{index}"),
+                                            IconName::ArrowRight,
+                                            "Open album",
                                         )
-                                        .child(self.render_thumbnail(
-                                            album.thumbnail_url.as_deref(),
-                                            px(48.),
-                                            IconName::BookOpen,
-                                            cx,
-                                        ))
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .child(
-                                                    div().font_medium().child(album.title.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(format!(
-                                                            "{} play{} · {} listened",
-                                                            album.play_count,
-                                                            if album.play_count == 1 {
-                                                                ""
-                                                            } else {
-                                                                "s"
-                                                            },
-                                                            format_duration(album.play_time)
-                                                        )),
-                                                ),
-                                        )
-                                        .child(
-                                            Button::new(format!("open-stats-album-{index}"))
-                                                .label("Open")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_online_browse(
-                                                        browse_item.clone(),
-                                                        cx,
-                                                    );
-                                                })),
-                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_online_browse(browse_item.clone(), cx);
+                                        })),
+                                    )
                                 },
                             ))
                     })
@@ -13522,21 +16416,27 @@ impl MetrolistShell {
                 cx,
             ))
             .child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .children(StatsPeriod::ALL.into_iter().map(|period| {
-                        Button::new(format!(
-                            "stats-period-{}",
-                            period.label().to_lowercase().replace(' ', "-")
-                        ))
-                        .label(period.label())
-                        .selected(self.stats_period == period)
-                        .disabled(self.stats_task.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_stats_period(period, cx);
+                h_flex().child(
+                    TabBar::new("stats-period")
+                        .pill()
+                        .small()
+                        .selected_index(
+                            StatsPeriod::ALL
+                                .iter()
+                                .position(|period| *period == self.stats_period)
+                                .unwrap_or_default(),
+                        )
+                        .on_click(cx.listener(|this, index: &usize, _, cx| {
+                            if let Some(period) = StatsPeriod::ALL.get(*index).copied() {
+                                this.select_stats_period(period, cx);
+                            }
                         }))
-                    })),
+                        .children(
+                            StatsPeriod::ALL
+                                .into_iter()
+                                .map(|period| Tab::new().label(period.label())),
+                        ),
+                ),
             )
             .child(content)
             .into_any_element()
@@ -13571,28 +16471,14 @@ impl MetrolistShell {
                     .children(favorites.iter().enumerate().map(|(index, entry)| {
                         let play_songs = songs.clone();
                         let favorite_song = entry.song.clone();
-                        h_flex()
-                            .flex_wrap()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .p_3()
+                        list_row_shell(SharedString::from(format!("favorite-row-{index}")), cx)
                             .child(Icon::new(IconName::Heart))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().font_medium().child(entry.song.title.clone()))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(entry.song.artist_line()),
-                                    ),
-                            )
+                            .child(media_text_block(
+                                entry.song.title.clone(),
+                                entry.song.artist_line(),
+                                None,
+                                cx,
+                            ))
                             .child(
                                 Button::new(format!("unfavorite-library-{index}"))
                                     .ghost()
@@ -13614,18 +16500,21 @@ impl MetrolistShell {
                                 cx,
                             ))
                             .child(
-                                Button::new(format!("play-favorite-{index}"))
-                                    .ghost()
-                                    .icon(IconName::Play)
-                                    .tooltip("Play")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                icon_ghost_button(
+                                    format!("play-favorite-{index}"),
+                                    IconName::Play,
+                                    "Play",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
                                         this.play_song_collection(
                                             play_songs.as_ref().clone(),
                                             index,
                                             window,
                                             cx,
                                         );
-                                    })),
+                                    },
+                                )),
                             )
                             .into_any_element()
                     }))
@@ -13640,21 +16529,20 @@ impl MetrolistShell {
             .into_any_element()
     }
 
-    fn render_library_playlist_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_library_auto_shortcuts(
+        &self,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         v_flex()
             .gap_3()
-            .child(
-                div().w_full().child(
-                    Input::new(&self.library_playlist_search_input).prefix(IconName::Search),
-                ),
-            )
             .child(div().font_semibold().child("Auto playlists"))
             .child(
                 h_flex()
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("library-auto-liked")
+                        Button::new(format!("{id}-liked"))
                             .label("Liked")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.library_tab = LibraryTab::Songs;
@@ -13664,7 +16552,7 @@ impl MetrolistShell {
                             })),
                     )
                     .child(
-                        Button::new("library-auto-offline")
+                        Button::new(format!("{id}-offline"))
                             .label("Offline")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.library_tab = LibraryTab::Songs;
@@ -13674,14 +16562,14 @@ impl MetrolistShell {
                             })),
                     )
                     .child(
-                        Button::new("library-auto-top")
+                        Button::new(format!("{id}-top"))
                             .label("My Top")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.navigate(Route::Stats, cx);
                             })),
                     )
                     .child(
-                        Button::new("library-auto-uploaded")
+                        Button::new(format!("{id}-uploaded"))
                             .label("Uploaded")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.library_tab = LibraryTab::Songs;
@@ -13691,6 +16579,436 @@ impl MetrolistShell {
                             })),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn render_library_playlist_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_3()
+            .child(
+                div().w_full().child(
+                    Input::new(&self.library_playlist_search_input).prefix(IconName::Search),
+                ),
+            )
+            .child(self.render_library_auto_shortcuts("library-auto", cx))
+            .into_any_element()
+    }
+
+    fn library_mix_results(&self) -> Vec<LibraryMixEntry> {
+        let query = self.library_mix_query.trim().to_lowercase();
+        let mut entries = Vec::new();
+
+        if !query.is_empty() {
+            let mut seen = HashSet::new();
+            let mut add_song = |song: &Song| {
+                let matches = song.title.to_lowercase().contains(&query)
+                    || song
+                        .artists
+                        .iter()
+                        .any(|artist| artist.name.to_lowercase().contains(&query))
+                    || song
+                        .album
+                        .as_ref()
+                        .is_some_and(|album| album.title.to_lowercase().contains(&query));
+                if matches && seen.insert(song.video_id.clone()) {
+                    entries.push(LibraryMixEntry::Song(song.clone()));
+                }
+            };
+            if let CloudLibraryViewState::Loaded(library) = &self.cloud_library_state {
+                for song in library
+                    .liked_songs
+                    .iter()
+                    .chain(&library.library_songs)
+                    .chain(&library.uploaded_songs)
+                {
+                    add_song(song);
+                }
+            }
+            for song in self.local_known_songs() {
+                add_song(&song);
+            }
+        }
+
+        let mut seen_browse = HashSet::new();
+        let mut add_browse = |item: &BrowseItem| {
+            let matches = query.is_empty()
+                || item.title.to_lowercase().contains(&query)
+                || item.subtitle.to_lowercase().contains(&query);
+            let key = format!("{}:{}", item.kind.label(), item.browse_id);
+            if matches && seen_browse.insert(key) {
+                entries.push(LibraryMixEntry::Browse(item.clone()));
+            }
+        };
+        if let CloudLibraryViewState::Loaded(library) = &self.cloud_library_state {
+            for item in library
+                .playlists
+                .iter()
+                .chain(&library.albums)
+                .chain(&library.uploaded_albums)
+                .chain(&library.artists)
+            {
+                add_browse(item);
+            }
+        }
+        if let StoredViewState::Loaded(items) = &self.local_catalog_state {
+            for item in items
+                .iter()
+                .filter(|item| matches!(item.kind, BrowseKind::Album | BrowseKind::Artist))
+            {
+                add_browse(item);
+            }
+        }
+
+        if let StoredViewState::Loaded(playlists) = &self.playlists_state {
+            for playlist in playlists {
+                if query.is_empty() || playlist.name.to_lowercase().contains(&query) {
+                    entries.push(LibraryMixEntry::LocalPlaylist(playlist.clone()));
+                }
+            }
+        }
+
+        if query.is_empty() {
+            match self.library_mix_sort {
+                LibraryMixSort::Recent => {
+                    if self.library_mix_sort_direction == SortDirection::Ascending {
+                        entries.reverse();
+                    }
+                }
+                LibraryMixSort::Name => entries.sort_by(|left, right| {
+                    let ordering = left
+                        .title()
+                        .to_lowercase()
+                        .cmp(&right.title().to_lowercase());
+                    if self.library_mix_sort_direction == SortDirection::Descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                }),
+            }
+        } else {
+            entries.sort_by(|left, right| {
+                left.search_priority()
+                    .cmp(&right.search_priority())
+                    .then_with(|| {
+                        left.title()
+                            .to_lowercase()
+                            .cmp(&right.title().to_lowercase())
+                    })
+            });
+        }
+
+        entries
+    }
+
+    fn render_library_mix(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entries = self.library_mix_results();
+        let songs = Arc::new(
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    LibraryMixEntry::Song(song) => Some(song.clone()),
+                    LibraryMixEntry::Browse(_) | LibraryMixEntry::LocalPlaylist(_) => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let loading = matches!(self.cloud_library_state, CloudLibraryViewState::Loading)
+            || matches!(self.local_catalog_state, StoredViewState::Loading)
+            || matches!(self.playlists_state, StoredViewState::Loading);
+        let cloud_refreshing = matches!(self.cloud_library_state, CloudLibraryViewState::Loading);
+        let (direction_icon, direction_label) = match self.library_mix_sort_direction {
+            SortDirection::Ascending => (IconName::SortAscending, "Ascending"),
+            SortDirection::Descending => (IconName::SortDescending, "Descending"),
+        };
+        let query_empty = self.library_mix_query.trim().is_empty();
+        let mut errors = Vec::new();
+        if let CloudLibraryViewState::Failed(error) = &self.cloud_library_state {
+            errors.push(format!("Cloud library unavailable: {error}"));
+        }
+        if let StoredViewState::Failed(error) = &self.local_catalog_state {
+            errors.push(format!("Local albums and artists unavailable: {error}"));
+        }
+        if let Some(error) = &self.local_catalog_error {
+            errors.push(format!("Local albums and artists unavailable: {error}"));
+        }
+        if let StoredViewState::Failed(error) = &self.playlists_state {
+            errors.push(format!("Local playlists unavailable: {error}"));
+        }
+
+        v_flex()
+            .gap_4()
+            .child(
+                div()
+                    .w_full()
+                    .child(Input::new(&self.library_mix_search_input).prefix(IconName::Search)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Sort by"),
+                            )
+                            .child(
+                                Button::new("library-mix-sort-recent")
+                                    .label("Recent")
+                                    .selected(self.library_mix_sort == LibraryMixSort::Recent)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.library_mix_sort = LibraryMixSort::Recent;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("library-mix-sort-name")
+                                    .label("Name")
+                                    .selected(self.library_mix_sort == LibraryMixSort::Name)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.library_mix_sort = LibraryMixSort::Name;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("library-mix-sort-direction")
+                                    .icon(direction_icon)
+                                    .label(direction_label)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.library_mix_sort_direction = match this
+                                            .library_mix_sort_direction
+                                        {
+                                            SortDirection::Ascending => SortDirection::Descending,
+                                            SortDirection::Descending => SortDirection::Ascending,
+                                        };
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("library-mix-new-playlist")
+                                    .icon(IconName::Plus)
+                                    .label("New playlist")
+                                    .selected(self.library_mix_create_visible)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.library_mix_create_visible = true;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("library-mix-refresh")
+                                    .label(if cloud_refreshing {
+                                        "Refreshing…"
+                                    } else {
+                                        "Refresh"
+                                    })
+                                    .loading(cloud_refreshing)
+                                    .disabled(
+                                        !self.account_ready()
+                                            || self.cloud_busy()
+                                            || cloud_refreshing,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.reload_cloud_library(cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .when(self.library_mix_create_visible, |layout| {
+                layout.child(
+                    h_flex()
+                        .max_w(px(620.))
+                        .gap_2()
+                        .child(div().flex_1().child(
+                            Input::new(&self.playlist_name_input).disabled(self.library_busy()),
+                        ))
+                        .child(
+                            Button::new("library-mix-create-playlist")
+                                .primary()
+                                .label(
+                                    if self.library_operation == LibraryOperation::CreatingPlaylist
+                                    {
+                                        "Creating…"
+                                    } else {
+                                        "Create"
+                                    },
+                                )
+                                .loading(
+                                    self.library_operation == LibraryOperation::CreatingPlaylist,
+                                )
+                                .disabled(self.library_busy())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.create_playlist(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("library-mix-cancel-playlist")
+                                .label("Cancel")
+                                .disabled(self.library_busy())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.library_mix_create_visible = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .child(self.render_library_auto_shortcuts("library-mix-auto", cx))
+            .when(
+                matches!(self.cloud_library_state, CloudLibraryViewState::SignedOut),
+                |layout| {
+                    layout.child(
+                        h_flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Sign in to include your YouTube Music library."),
+                            )
+                            .child(
+                                Button::new("library-mix-open-settings")
+                                    .label("Open account settings")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.navigate(Route::Settings, cx);
+                                    })),
+                            ),
+                    )
+                },
+            )
+            .children(errors.into_iter().map(|error| {
+                div()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().danger.opacity(0.12))
+                    .text_color(cx.theme().danger)
+                    .p_3()
+                    .text_sm()
+                    .child(error)
+            }))
+            .when(loading, |layout| {
+                layout.child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Icon::new(IconName::LoaderCircle))
+                        .child("Loading library items…"),
+                )
+            })
+            .when(entries.is_empty() && !loading, |layout| {
+                layout.child(
+                    v_flex()
+                        .min_h(px(220.))
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::BookOpen).size_8())
+                        .child(div().font_semibold().child(if query_empty {
+                            "Your library is empty"
+                        } else {
+                            "No library items match this search"
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if query_empty {
+                                    "Saved playlists, albums, and artists will appear here."
+                                } else {
+                                    "Try a different song, playlist, album, or artist name."
+                                }),
+                        ),
+                )
+            })
+            .when(!entries.is_empty(), |layout| {
+                layout
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} item{}",
+                                entries.len(),
+                                if entries.len() == 1 { "" } else { "s" }
+                            )),
+                    )
+                    .children(
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(index, entry)| match entry {
+                                LibraryMixEntry::Song(song) => {
+                                    let song_index = songs
+                                        .iter()
+                                        .position(|candidate| candidate.video_id == song.video_id)
+                                        .unwrap_or_default();
+                                    self.render_online_song_row(song_index, song, songs.clone(), cx)
+                                }
+                                LibraryMixEntry::Browse(item) => {
+                                    self.render_browse_item_row(index + 30_000, item, cx)
+                                }
+                                LibraryMixEntry::LocalPlaylist(playlist) => {
+                                    let selected = playlist.clone();
+                                    list_row_shell(
+                                        SharedString::from(format!(
+                                            "library-mix-local-playlist-{}",
+                                            playlist.id
+                                        )),
+                                        cx,
+                                    )
+                                    .child(self.render_local_playlist_thumbnail(
+                                        playlist.thumbnail_url.as_deref(),
+                                        &playlist.preview_thumbnail_urls,
+                                        px(44.),
+                                        cx,
+                                    ))
+                                    .child(media_text_block(
+                                        playlist.name.clone(),
+                                        format!(
+                                            "{} song{}",
+                                            playlist.song_count,
+                                            if playlist.song_count == 1 { "" } else { "s" }
+                                        ),
+                                        None,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Local playlist"),
+                                    )
+                                    .child(
+                                        Button::new(format!(
+                                            "open-library-mix-playlist-{}",
+                                            playlist.id
+                                        ))
+                                        .ghost()
+                                        .label("Open")
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.open_playlist(selected.clone(), window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .into_any_element()
+                                }
+                            }),
+                    )
+            })
             .into_any_element()
     }
 
@@ -13735,25 +17053,32 @@ impl MetrolistShell {
                         })
                         .into_any_element()
                 } else {
-                    h_flex()
-                        .flex_wrap()
-                        .gap_3()
+                    tile_row()
                         .children(visible.into_iter().map(|playlist| {
                             let selected = playlist.clone();
-                            Button::new(format!("open-playlist-{}", playlist.id))
-                                .w(px(210.))
-                                .justify_start()
-                                .icon(IconName::BookOpen)
-                                .label(format!(
-                                    "{} · {} song{}",
-                                    playlist.name,
+                            media_tile_shell(
+                                SharedString::from(format!("open-playlist-{}", playlist.id)),
+                                cx,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_playlist(selected.clone(), window, cx);
+                            }))
+                            .child(self.render_local_playlist_cover_art(
+                                playlist.thumbnail_url.as_deref(),
+                                &playlist.preview_thumbnail_urls,
+                                cx,
+                            ))
+                            .child(media_text_block(
+                                playlist.name.clone(),
+                                format!(
+                                    "{} song{} · stored locally",
                                     playlist.song_count,
                                     if playlist.song_count == 1 { "" } else { "s" }
-                                ))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_playlist(selected.clone(), cx);
-                                }))
-                                .into_any_element()
+                                ),
+                                Some(SharedString::from("Local playlist")),
+                                cx,
+                            ))
+                            .into_any_element()
                         }))
                         .into_any_element()
                 }
@@ -13867,6 +17192,279 @@ impl MetrolistShell {
                 .any(|artist| artist.name.to_lowercase().contains(&query))
     }
 
+    fn local_history_rows(&self, history: &[HistoryEntry]) -> Vec<HistoryListRow> {
+        history
+            .iter()
+            .filter(|entry| self.history_song_matches(&entry.song))
+            .cloned()
+            .enumerate()
+            .map(|(play_index, entry)| HistoryListRow::Local { play_index, entry })
+            .collect()
+    }
+
+    fn remote_history_rows(&self, page: &RemoteHistoryPage) -> Vec<HistoryListRow> {
+        let mut rows = Vec::new();
+        let mut play_index = 0;
+        for section in &page.sections {
+            let entries = section
+                .entries
+                .iter()
+                .filter(|entry| self.history_song_matches(&entry.song))
+                .cloned()
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            rows.push(HistoryListRow::Section(section.title.clone()));
+            for entry in entries {
+                rows.push(HistoryListRow::Remote { play_index, entry });
+                play_index += 1;
+            }
+        }
+        rows
+    }
+
+    fn history_play_songs(rows: &[HistoryListRow]) -> Arc<Vec<Song>> {
+        Arc::new(
+            rows.iter()
+                .filter_map(|row| match row {
+                    HistoryListRow::Local { entry, .. } => Some(entry.song.clone()),
+                    HistoryListRow::Remote { entry, .. } => Some(entry.song.clone()),
+                    HistoryListRow::Section(_) => None,
+                })
+                .collect(),
+        )
+    }
+
+    fn render_virtual_history_list(
+        &self,
+        rows: Vec<HistoryListRow>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let item_sizes = Rc::new(
+            rows.iter()
+                .map(|row| size(px(0.), row.height()))
+                .collect::<Vec<_>>(),
+        );
+        let rows = Arc::new(rows);
+        let songs = Self::history_play_songs(&rows);
+        div()
+            .id("history-virtual-list-wrap")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                v_virtual_list(cx.entity(), "history-virtual-list", item_sizes, {
+                    let rows = rows.clone();
+                    let songs = songs.clone();
+                    move |this, visible_range, _, cx| {
+                        visible_range
+                            .filter_map(|index| {
+                                rows.get(index).map(|row| {
+                                    this.render_history_virtual_item(index, row, songs.clone(), cx)
+                                })
+                            })
+                            .collect()
+                    }
+                })
+                .track_scroll(&self.history_scroll_handle)
+                .size_full(),
+            )
+            .vertical_scrollbar(&self.history_scroll_handle)
+            .into_any_element()
+    }
+
+    fn render_history_virtual_item(
+        &self,
+        index: usize,
+        row: &HistoryListRow,
+        songs: Arc<Vec<Song>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match row {
+            HistoryListRow::Section(title) => h_flex()
+                .id(SharedString::from(format!("history-section-{index}")))
+                .w_full()
+                .h_full()
+                .px_2()
+                .items_end()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(title.clone()),
+                )
+                .into_any_element(),
+            HistoryListRow::Local { play_index, entry } => self.render_history_entry_row(
+                format!("local-history-{index}"),
+                &entry.song,
+                Some(format_duration(entry.play_time)),
+                Some(format_history_age(entry.played_at_ms)),
+                *play_index,
+                songs,
+                HistoryEntryAction::RemoveLocal { entry_id: entry.id },
+                cx,
+            ),
+            HistoryListRow::Remote { play_index, entry } => self.render_history_entry_row(
+                format!("remote-history-{index}"),
+                &entry.song,
+                entry.song.duration.map(format_duration),
+                None,
+                *play_index,
+                songs,
+                HistoryEntryAction::RemoveRemote {
+                    feedback_token: entry.feedback_token.clone(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    fn render_history_entry_row(
+        &self,
+        id: String,
+        song: &Song,
+        primary_meta: Option<String>,
+        secondary_meta: Option<String>,
+        play_index: usize,
+        songs: Arc<Vec<Song>>,
+        action: HistoryEntryAction,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity();
+        let library_busy = self.library_busy();
+        let removing = matches!(
+            action,
+            HistoryEntryAction::RemoveRemote { .. }
+                if self.remote_history_operation == RemoteHistoryOperation::Removing
+        );
+        let more = Button::new(format!("{id}-more"))
+            .ghost()
+            .compact()
+            .icon(IconName::Ellipsis)
+            .tooltip("More actions")
+            .dropdown_menu({
+                let song = song.clone();
+                let view = view.clone();
+                let action = action.clone();
+                move |menu, _, _| {
+                    menu.item(PopupMenuItem::new("Play next").on_click({
+                        let view = view.clone();
+                        let song = song.clone();
+                        shell_menu_action(view, move |this, window, cx| {
+                            this.play_song_next(song.clone(), window, cx);
+                        })
+                    }))
+                    .item(PopupMenuItem::new("Add to queue").on_click({
+                        let view = view.clone();
+                        let song = song.clone();
+                        shell_menu_action(view, move |this, window, cx| {
+                            this.add_song_to_queue(song.clone(), window, cx);
+                        })
+                    }))
+                    .item(PopupMenuItem::new("Download").on_click({
+                        let view = view.clone();
+                        let song = song.clone();
+                        shell_menu_action(view, move |this, _, cx| {
+                            this.queue_song_download(song.clone(), cx);
+                        })
+                    }))
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(match &action {
+                            HistoryEntryAction::RemoveLocal { .. } => "Remove",
+                            HistoryEntryAction::RemoveRemote { .. } if removing => "Removing…",
+                            HistoryEntryAction::RemoveRemote { .. } => "Remove remote",
+                        })
+                        .disabled(match &action {
+                            HistoryEntryAction::RemoveLocal { .. } => library_busy,
+                            HistoryEntryAction::RemoveRemote { .. } => removing,
+                        })
+                        .on_click({
+                            let view = view.clone();
+                            let action = action.clone();
+                            shell_menu_action(view, move |this, _, cx| match &action {
+                                HistoryEntryAction::RemoveLocal { entry_id } => {
+                                    this.remove_local_history_entry(*entry_id, cx);
+                                }
+                                HistoryEntryAction::RemoveRemote { feedback_token } => {
+                                    if let Some(token) = feedback_token {
+                                        this.remove_remote_history_item(token.clone(), cx);
+                                    }
+                                }
+                            })
+                        }),
+                    )
+                }
+            });
+
+        list_row_shell(SharedString::from(id.clone()), cx)
+            .h_full()
+            .overflow_hidden()
+            .on_click({
+                let view = view.clone();
+                let songs = songs.clone();
+                move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.play_song_collection(songs.as_ref().clone(), play_index, window, cx);
+                    });
+                }
+            })
+            .child(self.render_thumbnail(
+                song.thumbnail_url.as_deref(),
+                px(40.),
+                IconName::Play,
+                cx,
+            ))
+            .child(media_text_block(
+                song.title.clone(),
+                song.artist_line(),
+                None,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .items_end()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(primary_meta.unwrap_or_default()),
+                    )
+                    .when_some(secondary_meta, |meta, age| {
+                        meta.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(age),
+                        )
+                    }),
+            )
+            .child(
+                icon_ghost_button(format!("{id}-play"), IconName::Play, "Play from history")
+                    .on_click({
+                        let view = view.clone();
+                        let songs = songs.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.play_song_collection(
+                                    songs.as_ref().clone(),
+                                    play_index,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+            )
+            .child(more)
+            .into_any_element()
+    }
+
     fn render_local_history_content(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.history_state {
             HistoryViewState::Loading => div()
@@ -13897,102 +17495,20 @@ impl MetrolistShell {
                 .child("A local entry appears after 30 seconds of actual playback.")
                 .into_any_element(),
             HistoryViewState::Loaded(history) => {
-                let filtered = history
-                    .iter()
-                    .filter(|entry| self.history_song_matches(&entry.song))
-                    .collect::<Vec<_>>();
-                if filtered.is_empty() {
+                let rows = self.local_history_rows(history);
+                if rows.is_empty() {
                     return div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child("No local history matches this title or artist.")
                         .into_any_element();
                 }
-                let songs = Arc::new(
-                    filtered
-                        .iter()
-                        .map(|entry| entry.song.clone())
-                        .collect::<Vec<_>>(),
-                );
-                v_flex()
-                    .gap_2()
-                    .children(filtered.into_iter().enumerate().map(|(index, entry)| {
-                        let play_songs = songs.clone();
-                        let entry_id = entry.id;
-                        h_flex()
-                            .flex_wrap()
-                            .w_full()
-                            .gap_4()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .p_3()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().font_medium().child(entry.song.title.clone()))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(entry.song.artist_line()),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .items_end()
-                                    .child(div().text_sm().child(format_duration(entry.play_time)))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format_history_age(entry.played_at_ms)),
-                                    ),
-                            )
-                            .child(self.download_button(
-                                format!("download-history-{index}"),
-                                &entry.song,
-                                cx,
-                            ))
-                            .child(self.queue_insert_buttons(
-                                format!("local-history-{index}"),
-                                &entry.song,
-                                cx,
-                            ))
-                            .child(
-                                Button::new(format!("remove-local-history-{index}"))
-                                    .ghost()
-                                    .label("Remove")
-                                    .disabled(self.library_busy())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_local_history_entry(entry_id, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("play-history-{index}"))
-                                    .ghost()
-                                    .icon(IconName::Play)
-                                    .tooltip("Play from history")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.play_song_collection(
-                                            play_songs.as_ref().clone(),
-                                            index,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .into_any_element()
-                    }))
-                    .into_any_element()
+                self.render_virtual_history_list(rows, cx)
             }
         }
     }
 
     fn render_remote_history_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        let removing = self.remote_history_operation == RemoteHistoryOperation::Removing;
         match &self.remote_history_state {
             RemoteHistoryViewState::SignedOut => div()
                 .text_sm()
@@ -14015,155 +17531,15 @@ impl MetrolistShell {
                 .child("YouTube Music returned no listening history.")
                 .into_any_element(),
             RemoteHistoryViewState::Loaded(page) => {
-                let sections = page
-                    .sections
-                    .iter()
-                    .filter_map(|section| {
-                        let entries = section
-                            .entries
-                            .iter()
-                            .filter(|entry| self.history_song_matches(&entry.song))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        (!entries.is_empty()).then(|| (section.title.clone(), entries))
-                    })
-                    .collect::<Vec<_>>();
-                if sections.is_empty() {
+                let rows = self.remote_history_rows(page);
+                if rows.is_empty() {
                     return div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child("No YouTube Music history matches this title or artist.")
                         .into_any_element();
                 }
-                let songs = Arc::new(
-                    sections
-                        .iter()
-                        .flat_map(|(_, entries)| entries.iter())
-                        .map(|entry| entry.song.clone())
-                        .collect::<Vec<_>>(),
-                );
-                v_flex()
-                    .gap_4()
-                    .children(sections.iter().enumerate().map(
-                        |(section_index, (section_title, entries))| {
-                            let section_start = sections
-                                .iter()
-                                .take(section_index)
-                                .map(|(_, entries)| entries.len())
-                                .sum::<usize>();
-                            let play_songs = songs.clone();
-                            v_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child(section_title.clone()),
-                                )
-                                .children(entries.iter().enumerate().map(
-                                    |(entry_index, entry)| {
-                                        let play_songs = play_songs.clone();
-                                        let play_index = section_start + entry_index;
-                                        let duration = entry
-                                            .song
-                                            .duration
-                                            .map(format_duration)
-                                            .unwrap_or_else(|| "—".into());
-                                        h_flex()
-                                            .flex_wrap()
-                                            .w_full()
-                                            .gap_3()
-                                            .items_center()
-                                            .rounded(cx.theme().radius)
-                                            .border_1()
-                                            .border_color(cx.theme().border)
-                                            .p_3()
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .font_medium()
-                                                            .child(entry.song.title.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(
-                                                                cx.theme().muted_foreground,
-                                                            )
-                                                            .child(entry.song.artist_line()),
-                                                    ),
-                                            )
-                                            .child(div().text_sm().child(duration))
-                                            .child(self.download_button(
-                                                format!(
-                                                    "download-remote-history-{section_index}-{entry_index}"
-                                                ),
-                                                &entry.song,
-                                                cx,
-                                            ))
-                                            .when_some(
-                                                entry.feedback_token.clone(),
-                                                |row, feedback_token| {
-                                                    row.child(
-                                                        Button::new(format!(
-                                                            "remove-remote-history-{section_index}-{entry_index}"
-                                                        ))
-                                                        .ghost()
-                                                        .label(if removing {
-                                                            "Removing…"
-                                                        } else {
-                                                            "Remove remote"
-                                                        })
-                                                        .tooltip(
-                                                            "Remove only this YouTube Music history entry",
-                                                        )
-                                                        .disabled(removing)
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.remove_remote_history_item(
-                                                                    feedback_token.clone(),
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                    )
-                                                },
-                                            )
-                                            .child(self.queue_insert_buttons(
-                                                format!(
-                                                    "remote-history-{section_index}-{entry_index}"
-                                                ),
-                                                &entry.song,
-                                                cx,
-                                            ))
-                                            .child(
-                                                Button::new(format!(
-                                                    "play-remote-history-{section_index}-{entry_index}"
-                                                ))
-                                                .ghost()
-                                                .icon(IconName::Play)
-                                                .tooltip("Play from YouTube Music history")
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.play_song_collection(
-                                                            play_songs.as_ref().clone(),
-                                                            play_index,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                            )
-                                            .into_any_element()
-                                    },
-                                ))
-                                .into_any_element()
-                        },
-                    ))
-                    .into_any_element()
+                self.render_virtual_history_list(rows, cx)
             }
         }
     }
@@ -14183,10 +17559,13 @@ impl MetrolistShell {
         };
 
         v_flex()
+            .flex_1()
+            .min_h_0()
             .gap_3()
             .child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
                     .flex_wrap()
                     .items_center()
                     .justify_between()
@@ -14291,7 +17670,9 @@ impl MetrolistShell {
 
     fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
-            .gap_6()
+            .size_full()
+            .min_h_0()
+            .gap_4()
             .child(self.page_heading(
                 "History",
                 "Search, replay, queue, download, or remove songs from local and YouTube Music listening history.",
@@ -14299,6 +17680,7 @@ impl MetrolistShell {
             ))
             .child(
                 h_flex()
+                    .flex_shrink_0()
                     .max_w(px(720.))
                     .gap_2()
                     .child(
@@ -14333,6 +17715,66 @@ impl MetrolistShell {
             .into_any_element()
     }
 
+    fn song_matches_query(song: &Song, normalized_query: &str) -> bool {
+        normalized_query.is_empty()
+            || song.title.to_lowercase().contains(normalized_query)
+            || song
+                .artists
+                .iter()
+                .any(|artist| artist.name.to_lowercase().contains(normalized_query))
+    }
+
+    fn sorted_local_playlist_songs(&self, songs: &[Song]) -> Vec<Song> {
+        if self.playlist_song_sort == PlaylistSongSort::Custom {
+            return songs.to_vec();
+        }
+
+        let mut sorted = songs.iter().cloned().enumerate().collect::<Vec<_>>();
+        sorted.sort_by(|(left_index, left), (right_index, right)| {
+            let primary = match self.playlist_song_sort {
+                PlaylistSongSort::Custom => std::cmp::Ordering::Equal,
+                PlaylistSongSort::DateAdded => self
+                    .playlist_song_metadata
+                    .get(&left.video_id)
+                    .map(|metadata| metadata.added_at_ms)
+                    .unwrap_or_default()
+                    .cmp(
+                        &self
+                            .playlist_song_metadata
+                            .get(&right.video_id)
+                            .map(|metadata| metadata.added_at_ms)
+                            .unwrap_or_default(),
+                    ),
+                PlaylistSongSort::Title => {
+                    left.title.to_lowercase().cmp(&right.title.to_lowercase())
+                }
+                PlaylistSongSort::Artist => left
+                    .artist_line()
+                    .to_lowercase()
+                    .cmp(&right.artist_line().to_lowercase()),
+                PlaylistSongSort::PlayTime => self
+                    .playlist_song_metadata
+                    .get(&left.video_id)
+                    .map(|metadata| metadata.play_time_ms)
+                    .unwrap_or_default()
+                    .cmp(
+                        &self
+                            .playlist_song_metadata
+                            .get(&right.video_id)
+                            .map(|metadata| metadata.play_time_ms)
+                            .unwrap_or_default(),
+                    ),
+            };
+            let primary = if self.playlist_song_sort_direction == SortDirection::Descending {
+                primary.reverse()
+            } else {
+                primary
+            };
+            primary.then_with(|| left_index.cmp(right_index))
+        });
+        sorted.into_iter().map(|(_, song)| song).collect()
+    }
+
     fn render_playlist_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(detail) = &self.playlist_detail else {
             return div().into_any_element();
@@ -14342,6 +17784,23 @@ impl MetrolistShell {
             | PlaylistDetailState::Loaded(playlist, _)
             | PlaylistDetailState::Failed(playlist, _) => playlist,
         };
+        let choose_cover_playlist = playlist.clone();
+        let remove_cover_playlist = playlist.clone();
+        let cover_updating = self.library_operation == LibraryOperation::UpdatingPlaylistCover;
+        let detail_preview_thumbnail_urls = if playlist.thumbnail_url.is_some() {
+            Vec::new()
+        } else {
+            match detail {
+                PlaylistDetailState::Loaded(_, songs) => songs
+                    .iter()
+                    .filter_map(|song| song.thumbnail_url.clone())
+                    .take(4)
+                    .collect(),
+                PlaylistDetailState::Loading(_) | PlaylistDetailState::Failed(_, _) => {
+                    playlist.preview_thumbnail_urls.clone()
+                }
+            }
+        };
         let header = h_flex()
             .items_center()
             .gap_3()
@@ -14350,11 +17809,24 @@ impl MetrolistShell {
                     .ghost()
                     .icon(IconName::ArrowLeft)
                     .label("Library")
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.playlist_detail = None;
+                        this.playlist_detail_query.clear();
+                        this.playlist_song_metadata.clear();
+                        this.playlist_selection_mode = false;
+                        this.playlist_selected_song_ids.clear();
+                        this.playlist_detail_search_input.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                        });
                         cx.notify();
                     })),
             )
+            .child(self.render_local_playlist_thumbnail(
+                playlist.thumbnail_url.as_deref(),
+                &detail_preview_thumbnail_urls,
+                px(112.),
+                cx,
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -14369,8 +17841,65 @@ impl MetrolistShell {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{} songs · stored locally", playlist.song_count)),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("choose-local-playlist-cover")
+                                    .label(if cover_updating {
+                                        "Updating cover…"
+                                    } else if playlist.thumbnail_url.is_some() {
+                                        "Replace cover"
+                                    } else {
+                                        "Choose cover"
+                                    })
+                                    .loading(cover_updating)
+                                    .disabled(self.library_busy())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.choose_local_playlist_cover(
+                                            choose_cover_playlist.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .when(playlist.thumbnail_url.is_some(), |row| {
+                                row.child(
+                                    Button::new("remove-local-playlist-cover")
+                                        .danger()
+                                        .label("Remove cover")
+                                        .disabled(self.library_busy())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_local_playlist_cover(
+                                                remove_cover_playlist.clone(),
+                                                cx,
+                                            );
+                                        })),
+                                )
+                            }),
                     ),
             );
+        let normalized_query = self.playlist_detail_query.trim().to_lowercase();
+        let sorted_playlist_songs = match detail {
+            PlaylistDetailState::Loaded(_, songs) => self.sorted_local_playlist_songs(songs),
+            PlaylistDetailState::Loading(_) | PlaylistDetailState::Failed(_, _) => Vec::new(),
+        };
+        let filtered_song_count = sorted_playlist_songs
+            .iter()
+            .filter(|song| Self::song_matches_query(song, &normalized_query))
+            .count();
+        let total_song_count = sorted_playlist_songs.len();
+        let selected_songs = sorted_playlist_songs
+            .iter()
+            .filter(|song| self.playlist_selected_song_ids.contains(&song.video_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_song_count = selected_songs.len();
+        let can_reorder_playlist = self.playlist_song_sort == PlaylistSongSort::Custom
+            && normalized_query.is_empty()
+            && !self.playlist_selection_mode;
 
         let content = match detail {
             PlaylistDetailState::Loading(_) => v_flex()
@@ -14403,105 +17932,412 @@ impl MetrolistShell {
                         .child("Add songs from search results."),
                 )
                 .into_any_element(),
-            PlaylistDetailState::Loaded(playlist, songs) => {
-                let song_collection = Arc::new(songs.clone());
-                v_flex()
-                    .gap_2()
-                    .children(songs.iter().enumerate().map(|(index, song)| {
-                        let play_songs = song_collection.clone();
-                        let remove_song = song.clone();
-                        let remove_playlist = playlist.clone();
-                        h_flex()
-                            .flex_wrap()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .p_3()
-                            .child(
-                                div()
-                                    .w(px(24.))
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child((index + 1).to_string()),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().font_medium().child(song.title.clone()))
+            PlaylistDetailState::Loaded(playlist, _) => {
+                let song_collection = Arc::new(sorted_playlist_songs.clone());
+                let visible_songs = sorted_playlist_songs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, song)| Self::song_matches_query(song, &normalized_query))
+                    .collect::<Vec<_>>();
+                if visible_songs.is_empty() {
+                    v_flex()
+                        .min_h(px(180.))
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::Search).size_8())
+                        .child("No matching songs")
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Try a different title or artist."),
+                        )
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .gap_2()
+                        .children(visible_songs.into_iter().map(|(index, song)| {
+                            let play_songs = song_collection.clone();
+                            let remove_song = song.clone();
+                            let remove_playlist = playlist.clone();
+                            let reorder_up_playlist = playlist.clone();
+                            let reorder_down_playlist = playlist.clone();
+                            let reorder_up_video_id = song.video_id.clone();
+                            let reorder_down_video_id = song.video_id.clone();
+                            let selected_song_id = song.video_id.clone();
+                            let selected =
+                                self.playlist_selected_song_ids.contains(&selected_song_id);
+                            list_row_shell(SharedString::from(format!("playlist-song-{index}")), cx)
+                                .child(
+                                    div()
+                                        .w(px(24.))
+                                        .flex_shrink_0()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child((index + 1).to_string()),
+                                )
+                                .child(media_text_block(
+                                    song.title.clone(),
+                                    song.artist_line(),
+                                    None,
+                                    cx,
+                                ))
+                                .when(self.playlist_selection_mode, |row| {
+                                    row.child(
+                                        Button::new(format!("select-playlist-song-{index}"))
+                                            .label(if selected { "Selected" } else { "Select" })
+                                            .selected(selected)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if !this
+                                                    .playlist_selected_song_ids
+                                                    .remove(&selected_song_id)
+                                                {
+                                                    this.playlist_selected_song_ids
+                                                        .insert(selected_song_id.clone());
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .when(!self.playlist_selection_mode, |row| {
+                                    row.when(can_reorder_playlist, |row| {
+                                        row.child(
+                                            Button::new(format!("move-up-playlist-song-{index}"))
+                                                .ghost()
+                                                .icon(IconName::ArrowUp)
+                                                .tooltip("Move up")
+                                                .disabled(self.library_busy() || index == 0)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.move_local_playlist_song(
+                                                        reorder_up_playlist.clone(),
+                                                        reorder_up_video_id.clone(),
+                                                        true,
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(format!("move-down-playlist-song-{index}"))
+                                                .ghost()
+                                                .icon(IconName::ArrowDown)
+                                                .tooltip("Move down")
+                                                .disabled(
+                                                    self.library_busy()
+                                                        || index.saturating_add(1)
+                                                            >= total_song_count,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.move_local_playlist_song(
+                                                        reorder_down_playlist.clone(),
+                                                        reorder_down_video_id.clone(),
+                                                        false,
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                    })
                                     .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(song.artist_line()),
-                                    ),
-                            )
-                            .child(
-                                Button::new(format!("remove-playlist-song-{index}"))
-                                    .ghost()
-                                    .label("Remove")
-                                    .disabled(self.library_busy())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_from_playlist(
-                                            remove_playlist.clone(),
-                                            remove_song.clone(),
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(self.download_button(
-                                format!("download-playlist-song-{index}"),
-                                song,
-                                cx,
-                            ))
-                            .child(self.queue_insert_buttons(
-                                format!("local-playlist-{index}"),
-                                song,
-                                cx,
-                            ))
-                            .child(
-                                Button::new(format!("play-playlist-song-{index}"))
-                                    .ghost()
-                                    .icon(IconName::Play)
-                                    .tooltip("Play")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.play_song_collection(
-                                            play_songs.as_ref().clone(),
-                                            index,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .into_any_element()
-                    }))
-                    .into_any_element()
+                                        Button::new(format!("remove-playlist-song-{index}"))
+                                            .ghost()
+                                            .label("Remove")
+                                            .disabled(self.library_busy())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.remove_from_playlist(
+                                                    remove_playlist.clone(),
+                                                    remove_song.clone(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(self.download_button(
+                                        format!("download-playlist-song-{index}"),
+                                        song,
+                                        cx,
+                                    ))
+                                    .child(self.queue_insert_buttons(
+                                        format!("local-playlist-{index}"),
+                                        song,
+                                        cx,
+                                    ))
+                                    .child(
+                                        Button::new(format!("play-playlist-song-{index}"))
+                                            .ghost()
+                                            .icon(IconName::Play)
+                                            .tooltip("Play")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.play_song_collection(
+                                                    play_songs.as_ref().clone(),
+                                                    index,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                })
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                }
             }
         };
         let rename_playlist = playlist.clone();
         let delete_playlist = playlist.clone();
-        let play_all = match detail {
-            PlaylistDetailState::Loaded(_, songs) if !songs.is_empty() => {
-                let songs = songs.clone();
-                Some(
-                    Button::new("play-playlist")
-                        .primary()
-                        .icon(IconName::Play)
-                        .label("Play")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.play_song_collection(songs.clone(), 0, window, cx);
-                        })),
+        let speed_dial_playlist = playlist.clone();
+        let speed_dial_pinned = self.is_speed_dial_local_playlist(playlist.id);
+        let speed_dial_busy_key = format!("local-playlist:{}", playlist.id);
+        let speed_dial_busy = self.speed_dial_busy.as_deref() == Some(speed_dial_busy_key.as_str());
+        let loaded_songs = (!sorted_playlist_songs.is_empty()).then_some(sorted_playlist_songs);
+        let has_loaded_songs = loaded_songs.is_some();
+        let all_song_ids = loaded_songs
+            .as_ref()
+            .map(|songs| {
+                songs
+                    .iter()
+                    .map(|song| song.video_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let host_controlled = self.listen_together_is_guest();
+        let playlist_download_ids = loaded_songs
+            .as_ref()
+            .map(|songs| {
+                songs
+                    .iter()
+                    .filter(|song| self.download_for(&song.video_id).is_some())
+                    .map(|song| song.video_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let playlist_download_removing = playlist_download_ids
+            .iter()
+            .any(|video_id| self.download_removals.contains(video_id));
+        let play_all = loaded_songs.clone().map(|songs| {
+            Button::new("play-playlist")
+                .primary()
+                .icon(IconName::Play)
+                .label("Play")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.play_song_collection(songs.clone(), 0, window, cx);
+                }))
+        });
+        let shuffle_all = loaded_songs.clone().map(|songs| {
+            Button::new("shuffle-local-playlist")
+                .label("Shuffle")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.play_shuffled_collection(songs.clone(), window, cx);
+                }))
+        });
+        let queue_all = loaded_songs.clone().map(|songs| {
+            Button::new("queue-local-playlist")
+                .label("Queue all")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.add_collection_to_queue(songs.clone(), window, cx);
+                }))
+        });
+        let download_all = loaded_songs.clone().map(|songs| {
+            Button::new("download-local-playlist")
+                .label("Download all")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    for song in songs.clone() {
+                        this.queue_song_download(song, cx);
+                    }
+                }))
+        });
+        let remove_downloads_playlist_name = playlist.name.clone();
+        let remove_downloads = (!playlist_download_ids.is_empty()).then(|| {
+            let video_ids = playlist_download_ids.clone();
+            Button::new("remove-local-playlist-downloads")
+                .danger()
+                .label(if playlist_download_removing {
+                    "Removing downloads…"
+                } else {
+                    "Remove downloads"
+                })
+                .disabled(playlist_download_removing)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.confirm_remove_playlist_downloads(
+                        remove_downloads_playlist_name.clone(),
+                        video_ids.clone(),
+                        window,
+                        cx,
+                    );
+                }))
+        });
+        let export_csv_playlist = playlist.clone();
+        let export_csv = loaded_songs.clone().map(|songs| {
+            Button::new("export-local-playlist-csv")
+                .label(if self.playlist_exporting {
+                    "Exporting…"
+                } else {
+                    "Export CSV"
+                })
+                .disabled(self.playlist_exporting)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.export_local_playlist(
+                        export_csv_playlist.clone(),
+                        songs.clone(),
+                        PlaylistExportFormat::Csv,
+                        window,
+                        cx,
+                    );
+                }))
+        });
+        let export_m3u_playlist = playlist.clone();
+        let export_m3u = loaded_songs.clone().map(|songs| {
+            Button::new("export-local-playlist-m3u")
+                .label(if self.playlist_exporting {
+                    "Exporting…"
+                } else {
+                    "Export M3U"
+                })
+                .disabled(self.playlist_exporting)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.export_local_playlist(
+                        export_m3u_playlist.clone(),
+                        songs.clone(),
+                        PlaylistExportFormat::M3u,
+                        window,
+                        cx,
+                    );
+                }))
+        });
+        let copy_track_list = loaded_songs.map(|songs| {
+            let track_list = songs
+                .iter()
+                .map(|song| song.title.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Button::new("copy-local-playlist-track-list")
+                .label("Copy track list")
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(track_list.clone()));
+                }))
+        });
+        let selected_play = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("play-local-playlist-selection")
+                .primary()
+                .icon(IconName::Play)
+                .label("Play")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.playlist_selection_mode = false;
+                    this.playlist_selected_song_ids.clear();
+                    this.play_song_collection(songs.clone(), 0, window, cx);
+                }))
+        });
+        let selected_shuffle = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("shuffle-local-playlist-selection")
+                .label("Shuffle")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.playlist_selection_mode = false;
+                    this.playlist_selected_song_ids.clear();
+                    this.play_shuffled_collection(songs.clone(), window, cx);
+                }))
+        });
+        let selected_play_next = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("play-next-local-playlist-selection")
+                .label("Play next")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.playlist_selection_mode = false;
+                    this.playlist_selected_song_ids.clear();
+                    this.play_collection_next(songs.clone(), window, cx);
+                }))
+        });
+        let selected_queue = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("queue-local-playlist-selection")
+                .label("Queue")
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.playlist_selection_mode = false;
+                    this.playlist_selected_song_ids.clear();
+                    this.add_collection_to_queue(songs.clone(), window, cx);
+                }))
+        });
+        let selected_add_to_playlist = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("add-local-playlist-selection-to-playlist")
+                .label("Add to playlist")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.playlist_selection_mode = false;
+                    this.playlist_selected_song_ids.clear();
+                    this.open_playlist_picker_songs(songs.clone(), cx);
+                }))
+        });
+        let selected_download = (!selected_songs.is_empty()).then(|| {
+            let songs = selected_songs.clone();
+            Button::new("download-local-playlist-selection")
+                .label("Download")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    for song in songs.clone() {
+                        this.queue_song_download(song, cx);
+                    }
+                }))
+        });
+        let remove_selection_playlist = playlist.clone();
+        let selected_remove = (!selected_songs.is_empty()).then(|| {
+            let video_ids = selected_songs
+                .iter()
+                .map(|song| song.video_id.clone())
+                .collect::<Vec<_>>();
+            Button::new("remove-local-playlist-selection")
+                .danger()
+                .label(
+                    if self.library_operation == LibraryOperation::RemovingFromPlaylist {
+                        "Removing…"
+                    } else {
+                        "Remove selected"
+                    },
                 )
-            }
-            _ => None,
-        };
+                .disabled(self.library_busy())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.remove_many_from_playlist(
+                        remove_selection_playlist.clone(),
+                        video_ids.clone(),
+                        cx,
+                    );
+                }))
+        });
 
         v_flex()
             .gap_6()
             .child(header)
+            .when_some(self.speed_dial_error.clone(), |layout, message| {
+                layout.child(div().text_sm().text_color(cx.theme().danger).child(message))
+            })
+            .when_some(self.speed_dial_notice.clone(), |layout, message| {
+                layout.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(message),
+                )
+            })
+            .when_some(self.playlist_export_notice.clone(), |layout, message| {
+                layout.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(message),
+                )
+            })
+            .when_some(self.playlist_cover_notice.clone(), |layout, message| {
+                layout.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(message),
+                )
+            })
             .when_some(self.library_error.clone(), |layout, message| {
                 layout.child(
                     div()
@@ -14512,10 +18348,236 @@ impl MetrolistShell {
                         .child(message),
                 )
             })
+            .when_some(self.download_error.clone(), |layout, message| {
+                layout.child(
+                    div()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().danger.opacity(0.12))
+                        .text_color(cx.theme().danger)
+                        .p_3()
+                        .child(message),
+                )
+            })
+            .when(
+                self.library_operation == LibraryOperation::ReorderingPlaylist,
+                |layout| {
+                    layout.child(
+                        h_flex()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(Icon::new(IconName::LoaderCircle))
+                            .child("Updating custom order…"),
+                    )
+                },
+            )
+            .when(total_song_count > 0, |layout| {
+                layout.child(
+                    v_flex()
+                        .max_w(px(720.))
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Sort"),
+                                )
+                                .children(PlaylistSongSort::ALL.into_iter().map(|sort| {
+                                    Button::new(format!("local-playlist-song-sort-{}", sort.key()))
+                                        .label(sort.label())
+                                        .selected(self.playlist_song_sort == sort)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.playlist_song_sort = sort;
+                                            cx.notify();
+                                        }))
+                                }))
+                                .when(self.playlist_song_sort != PlaylistSongSort::Custom, |row| {
+                                    let (icon, label) = match self.playlist_song_sort_direction {
+                                        SortDirection::Ascending => {
+                                            (IconName::SortAscending, "Ascending")
+                                        }
+                                        SortDirection::Descending => {
+                                            (IconName::SortDescending, "Descending")
+                                        }
+                                    };
+                                    row.child(
+                                        Button::new("local-playlist-song-sort-direction")
+                                            .icon(icon)
+                                            .label(label)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.playlist_song_sort_direction =
+                                                    match this.playlist_song_sort_direction {
+                                                        SortDirection::Ascending => {
+                                                            SortDirection::Descending
+                                                        }
+                                                        SortDirection::Descending => {
+                                                            SortDirection::Ascending
+                                                        }
+                                                    };
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    div().flex_1().child(
+                                        Input::new(&self.playlist_detail_search_input)
+                                            .prefix(IconName::Search),
+                                    ),
+                                )
+                                .when(!normalized_query.is_empty(), |row| {
+                                    row.child(
+                                        Button::new("clear-local-playlist-filter")
+                                            .label("Clear filter")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.playlist_detail_query.clear();
+                                                this.playlist_detail_search_input.update(
+                                                    cx,
+                                                    |input, cx| {
+                                                        input.set_value("", window, cx);
+                                                    },
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
+                        .when(!normalized_query.is_empty(), |search| {
+                            search.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{filtered_song_count} of {total_song_count} songs",
+                                    )),
+                            )
+                        }),
+                )
+            })
+            .when(self.playlist_selection_mode, |layout| {
+                let all_selected = selected_song_count == total_song_count;
+                let select_all_ids = all_song_ids.clone();
+                layout.child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .font_semibold()
+                                        .child(format!("{selected_song_count} selected")),
+                                )
+                                .child(
+                                    Button::new("toggle-all-local-playlist-songs")
+                                        .label(if all_selected {
+                                            "Clear all"
+                                        } else {
+                                            "Select all"
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if all_selected {
+                                                this.playlist_selected_song_ids.clear();
+                                            } else {
+                                                this.playlist_selected_song_ids =
+                                                    select_all_ids.iter().cloned().collect();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("close-local-playlist-selection")
+                                        .label("Done")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.playlist_selection_mode = false;
+                                            this.playlist_selected_song_ids.clear();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .when_some(selected_play, |row, button| row.child(button))
+                                .when_some(selected_shuffle, |row, button| row.child(button))
+                                .when_some(selected_play_next, |row, button| row.child(button))
+                                .when_some(selected_queue, |row, button| row.child(button))
+                                .when_some(selected_add_to_playlist, |row, button| {
+                                    row.child(button)
+                                })
+                                .when_some(selected_download, |row, button| row.child(button))
+                                .when_some(selected_remove, |row, button| row.child(button)),
+                        ),
+                )
+            })
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_2()
                     .when_some(play_all, |row, button| row.child(button))
+                    .when_some(shuffle_all, |row, button| row.child(button))
+                    .when_some(queue_all, |row, button| row.child(button))
+                    .when_some(download_all, |row, button| row.child(button))
+                    .when_some(remove_downloads, |row, button| row.child(button))
+                    .when_some(export_csv, |row, button| row.child(button))
+                    .when_some(export_m3u, |row, button| row.child(button))
+                    .when_some(copy_track_list, |row, button| row.child(button))
+                    .when(has_loaded_songs, |row| {
+                        row.child(
+                            Button::new("select-local-playlist-songs")
+                                .label(if self.playlist_selection_mode {
+                                    "Selecting"
+                                } else {
+                                    "Select"
+                                })
+                                .selected(self.playlist_selection_mode)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.playlist_selection_mode = !this.playlist_selection_mode;
+                                    this.playlist_selected_song_ids.clear();
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("pin-local-playlist-speed-dial")
+                            .label(if speed_dial_busy {
+                                if speed_dial_pinned {
+                                    "Removing…"
+                                } else {
+                                    "Pinning…"
+                                }
+                            } else if speed_dial_pinned {
+                                "Unpin"
+                            } else {
+                                "Pin to Speed Dial"
+                            })
+                            .selected(speed_dial_pinned)
+                            .disabled(
+                                self.speed_dial_busy.is_some()
+                                    || !matches!(
+                                        &self.speed_dial_local_playlists_state,
+                                        StoredViewState::Loaded(_)
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_speed_dial_local_playlist(
+                                    speed_dial_playlist.clone(),
+                                    cx,
+                                );
+                            })),
+                    )
                     .child(
                         Button::new("rename-playlist")
                             .label(
@@ -14567,6 +18629,7 @@ impl MetrolistShell {
         let operation_label = match self.cloud_library_operation {
             CloudLibraryOperation::Idle => None,
             CloudLibraryOperation::SettingVideoLike => Some("Updating liked songs…"),
+            CloudLibraryOperation::SettingSongLibrary => Some("Updating library songs…"),
             CloudLibraryOperation::SettingPlaylistLike => Some("Updating saved playlists…"),
             CloudLibraryOperation::SettingAlbumLike => Some("Updating saved albums…"),
             CloudLibraryOperation::SettingSubscription => Some("Updating subscription…"),
@@ -14915,15 +18978,7 @@ impl MetrolistShell {
                                 )
                             },
                         );
-                        h_flex()
-                            .flex_wrap()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .p_3()
+                        list_row_shell(SharedString::from(format!("download-row-{index}")), cx)
                             .child(self.render_thumbnail(
                                 download.song.thumbnail_url.as_deref(),
                                 px(44.),
@@ -14934,30 +18989,21 @@ impl MetrolistShell {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().font_medium().child(download.song.title.clone()))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(download.song.artist_line()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!(
-                                                "{} · {} · {progress}",
-                                                download.state.label(),
-                                                download.audio_quality.label()
-                                            )),
-                                    )
+                                    .child(title_line(download.song.title.clone()))
+                                    .child(subtitle_line(
+                                        download.song.artist_line(),
+                                        cx.theme().muted_foreground,
+                                    ))
+                                    .child(caption_line(
+                                        format!(
+                                            "{} · {} · {progress}",
+                                            download.state.label(),
+                                            download.audio_quality.label()
+                                        ),
+                                        cx.theme().muted_foreground,
+                                    ))
                                     .when_some(download.last_error.clone(), |details, error| {
-                                        details.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().danger)
-                                                .child(error),
-                                        )
+                                        details.child(caption_line(error, cx.theme().danger))
                                     }),
                             )
                             .when(download.is_complete(), |row| {
@@ -16632,7 +20678,7 @@ impl MetrolistShell {
                     .gap_3()
                     .child(self.page_heading(
                         "Library",
-                        "Browse cloud and local collections, including persistent offline downloads stored on this device.",
+                        "Search cloud and local songs, playlists, albums, and artists from one place.",
                         cx,
                     ))
                     .when(retry_targets.any() || local_library_loading, |heading| {
@@ -16683,12 +20729,14 @@ impl MetrolistShell {
             .when(selected_tab == LibraryTab::Playlists, |layout| {
                 layout.child(self.render_library_playlist_controls(cx))
             })
-            .when(
-                matches!(selected_tab, LibraryTab::Overview | LibraryTab::Playlists),
-                |layout| {
-                    layout.child(self.render_cloud_library_section(selected_tab, cx))
-                },
-            )
+            .when(selected_tab == LibraryTab::Overview, |layout| {
+                layout
+                    .child(self.render_library_mix(cx))
+                    .child(self.render_downloads_section(cx))
+            })
+            .when(selected_tab == LibraryTab::Playlists, |layout| {
+                layout.child(self.render_cloud_library_section(selected_tab, cx))
+            })
             .when(selected_tab == LibraryTab::Songs, |layout| {
                 layout.child(self.render_library_songs(cx))
             })
@@ -16698,24 +20746,11 @@ impl MetrolistShell {
             .when(selected_tab == LibraryTab::Artists, |layout| {
                 layout.child(self.render_library_catalog(BrowseKind::Artist, cx))
             })
-            .when(
-                matches!(selected_tab, LibraryTab::Overview | LibraryTab::Podcasts),
-                |layout| layout.child(self.render_podcasts_section(selected_tab, cx)),
-            )
-            .when(
-                selected_tab == LibraryTab::Overview,
-                |layout| {
-                    layout
-                        .child(self.render_downloads_section(cx))
-                        .child(self.render_favorites_section(cx))
-                },
-            )
-            .when(
-                matches!(selected_tab, LibraryTab::Overview | LibraryTab::Playlists),
-                |layout| layout.child(self.render_playlists_section(cx)),
-            )
-            .when(selected_tab == LibraryTab::Overview, |layout| {
-                layout.child(self.render_history_section(cx))
+            .when(selected_tab == LibraryTab::Podcasts, |layout| {
+                layout.child(self.render_podcasts_section(selected_tab, cx))
+            })
+            .when(selected_tab == LibraryTab::Playlists, |layout| {
+                layout.child(self.render_playlists_section(cx))
             })
             .into_any_element()
     }
@@ -18937,14 +22972,526 @@ impl MetrolistShell {
             .into_any_element()
     }
 
+    fn render_sleep_timer_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_4()
+            .max_w(px(680.))
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_5()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Sleep timer behavior"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Applied when starting a timer from the full player or Queue panel."),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Finish current song"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("After a minute timer expires, either pause immediately or wait for the current song to end."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("sleep-timer-finish-song-off")
+                            .label("Stop at timer")
+                            .selected(!self.settings_draft.sleep_timer_stop_after_current_song)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.sleep_timer_stop_after_current_song = false;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("sleep-timer-finish-song-on")
+                            .label("Finish current song")
+                            .selected(self.settings_draft.sleep_timer_stop_after_current_song)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.sleep_timer_stop_after_current_song = true;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Fade out"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Gradually lower only the audio output during the final 60 seconds before playback stops."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("sleep-timer-fade-out-off")
+                            .label("Full volume")
+                            .selected(!self.settings_draft.sleep_timer_fade_out)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.sleep_timer_fade_out = false;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("sleep-timer-fade-out-on")
+                            .label("Fade last 60 seconds")
+                            .selected(self.settings_draft.sleep_timer_fade_out)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.sleep_timer_fade_out = true;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_skip_silence_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_4()
+            .max_w(px(680.))
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_5()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Skip silence"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Compress sustained near-silent audio while keeping playback position, lyrics, history, and timers aligned to the original media timeline."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("skip-silence-off")
+                            .label("Play all audio")
+                            .selected(!self.settings_draft.skip_silence)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.skip_silence = false;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("skip-silence-on")
+                            .label("Compress silence")
+                            .selected(self.settings_draft.skip_silence)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.skip_silence = true;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Instant skip"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("After two continuous seconds of silence, skip the remainder immediately instead of retaining compressed samples."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("skip-silence-instant-off")
+                            .label("Normal compression")
+                            .selected(!self.settings_draft.skip_silence_instant)
+                            .disabled(busy || !self.settings_draft.skip_silence)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.skip_silence_instant = false;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("skip-silence-instant-on")
+                            .label("Instant after 2 seconds")
+                            .selected(self.settings_draft.skip_silence_instant)
+                            .disabled(busy || !self.settings_draft.skip_silence)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.skip_silence_instant = true;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_crossfade_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_4()
+            .max_w(px(680.))
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_5()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("Crossfade"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Overlap the end of the current song with the beginning of the next song on the same audio output."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("crossfade-off")
+                            .label("Off")
+                            .selected(!self.settings_draft.crossfade)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.crossfade = false;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("crossfade-on")
+                            .label("On")
+                            .selected(self.settings_draft.crossfade)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_draft.crossfade = true;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(self.settings_draft.crossfade, |card| {
+                card.child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().font_semibold().child("Duration"))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Button::new("crossfade-duration-less")
+                                        .label("− 1 second")
+                                        .disabled(
+                                            busy
+                                                || self.settings_draft.crossfade_seconds
+                                                    <= MIN_CROSSFADE_SECONDS,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.settings_draft.crossfade_seconds = this
+                                                .settings_draft
+                                                .crossfade_seconds
+                                                .saturating_sub(1)
+                                                .max(MIN_CROSSFADE_SECONDS);
+                                            this.settings_error = None;
+                                            this.settings_notice = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div().font_semibold().child(format!(
+                                        "{} seconds",
+                                        self.settings_draft.crossfade_seconds
+                                    )),
+                                )
+                                .child(
+                                    Button::new("crossfade-duration-more")
+                                        .label("+ 1 second")
+                                        .disabled(
+                                            busy
+                                                || self.settings_draft.crossfade_seconds
+                                                    >= MAX_CROSSFADE_SECONDS,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.settings_draft.crossfade_seconds = this
+                                                .settings_draft
+                                                .crossfade_seconds
+                                                .saturating_add(1)
+                                                .min(MAX_CROSSFADE_SECONDS);
+                                            this.settings_error = None;
+                                            this.settings_notice = None;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().font_semibold().child("Gapless albums"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Keep the original transition when consecutive songs share the same album."),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("crossfade-gapless-off")
+                                .label("Always crossfade")
+                                .selected(!self.settings_draft.crossfade_gapless_albums)
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings_draft.crossfade_gapless_albums = false;
+                                    this.settings_error = None;
+                                    this.settings_notice = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("crossfade-gapless-on")
+                                .label("Keep same album gapless")
+                                .selected(self.settings_draft.crossfade_gapless_albums)
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings_draft.crossfade_gapless_albums = true;
+                                    this.settings_error = None;
+                                    this.settings_notice = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_content_locale_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let language_label = if self.settings_draft.content_language == SYSTEM_CONTENT_LOCALE {
+            format!(
+                "System default ({})",
+                self.settings_draft.resolved_content_language()
+            )
+        } else {
+            let name = content_language_name(&self.settings_draft.content_language)
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.settings_draft.content_language.clone());
+            format!("{} ({})", name, self.settings_draft.content_language)
+        };
+        let country_label = if self.settings_draft.content_country == SYSTEM_CONTENT_LOCALE {
+            format!(
+                "System default ({})",
+                self.settings_draft.resolved_content_country()
+            )
+        } else {
+            let name = content_country_name(&self.settings_draft.content_country)
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.settings_draft.content_country.clone());
+            format!("{} ({})", name, self.settings_draft.content_country)
+        };
+        let active_language = self.settings.resolved_content_language();
+        let active_country = self.settings.resolved_content_country();
+        let language_view = cx.entity();
+        let language_selection = self.settings_draft.content_language.clone();
+        let country_view = cx.entity();
+        let country_selection = self.settings_draft.content_country.clone();
+
+        v_flex()
+            .gap_4()
+            .max_w(px(680.))
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_5()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().font_semibold().child("YouTube Music content locale"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Choose the language and country or region sent with Home, Search, Browse, Radio, and account-library requests."),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child("Content language"))
+                    .child(
+                        Button::new("content-language")
+                            .label(language_label)
+                            .disabled(busy)
+                            .dropdown_menu(move |menu, _, _| {
+                                let system_view = language_view.clone();
+                                let menu = menu
+                                    .max_h(px(480.))
+                                    .scrollable(true)
+                                    .item(
+                                        PopupMenuItem::new("System default")
+                                            .checked(
+                                                language_selection == SYSTEM_CONTENT_LOCALE,
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                system_view.update(cx, |this, cx| {
+                                                    this.settings_draft.content_language =
+                                                        SYSTEM_CONTENT_LOCALE.into();
+                                                    this.settings_error = None;
+                                                    this.settings_notice = None;
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .separator();
+                                CONTENT_LANGUAGES.iter().fold(menu, |menu, option| {
+                                    let view = language_view.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(format!(
+                                            "{} ({})",
+                                            option.name, option.code
+                                        ))
+                                        .checked(language_selection == option.code)
+                                        .on_click(move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.settings_draft.content_language =
+                                                    option.code.into();
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            });
+                                        }),
+                                    )
+                                })
+                            }),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child("Content country or region"))
+                    .child(
+                        Button::new("content-country")
+                            .label(country_label)
+                            .disabled(busy)
+                            .dropdown_menu(move |menu, _, _| {
+                                let system_view = country_view.clone();
+                                let menu = menu
+                                    .max_h(px(480.))
+                                    .scrollable(true)
+                                    .item(
+                                        PopupMenuItem::new("System default")
+                                            .checked(country_selection == SYSTEM_CONTENT_LOCALE)
+                                            .on_click(move |_, _, cx| {
+                                                system_view.update(cx, |this, cx| {
+                                                    this.settings_draft.content_country =
+                                                        SYSTEM_CONTENT_LOCALE.into();
+                                                    this.settings_error = None;
+                                                    this.settings_notice = None;
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .separator();
+                                CONTENT_COUNTRIES.iter().fold(menu, |menu, option| {
+                                    let view = country_view.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(format!(
+                                            "{} ({})",
+                                            option.name, option.code
+                                        ))
+                                        .checked(country_selection == option.code)
+                                        .on_click(move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.settings_draft.content_country =
+                                                    option.code.into();
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            });
+                                        }),
+                                    )
+                                })
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "Active requests: language {active_language}, country/region {active_country}. Changes take effect after Save and apply.",
+                    )),
+            )
+            .into_any_element()
+    }
+
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.settings_operation == SettingsOperation::Applying
+            || self.storage_operation != StorageOperation::Idle
+            || self.library_busy()
+            || self.search_history_task.is_some()
             || self.playback_parameters_pending.is_some()
             || self.equalizer_operation != EqualizerOperation::Idle
             || self.account_operation != AccountOperation::Idle
             || self.lastfm_operation != LastFmOperation::Idle
             || self.cloud_busy()
             || matches!(self.account_state, AccountViewState::Checking);
+        let download_count = match &self.downloads_state {
+            StoredViewState::Loaded(downloads) => downloads.len(),
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        };
+        let listening_history_count = match &self.history_state {
+            HistoryViewState::Loaded(history) => history.len(),
+            HistoryViewState::Loading | HistoryViewState::Failed(_) => 0,
+        };
+        let search_history_count = match &self.search_history_state {
+            StoredViewState::Loaded(history) => history.len(),
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        };
+        let clearing_listening_history =
+            self.library_operation == LibraryOperation::ClearingHistory;
+        let clearing_search_history =
+            search_history_count > 0 && self.search_history_task.is_some();
         v_flex()
             .gap_6()
             .child(self.page_heading(
@@ -18957,6 +23504,7 @@ impl MetrolistShell {
             .child(self.render_listen_together_settings(busy, cx))
             .child(self.render_discord_settings(busy, cx))
             .child(self.render_playback_parameters_settings(busy, cx))
+            .child(self.render_content_locale_settings(busy, cx))
             .child(
                 v_flex()
                     .gap_4()
@@ -19113,6 +23661,57 @@ impl MetrolistShell {
                         )
                     }),
             )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .max_w(px(680.))
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_5()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Progressive seek"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Double-click the left or right half of the full-player artwork to seek 5 seconds. Progressive mode increases consecutive seeks to 10, 15, and more seconds."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("progressive-seek-off")
+                                    .label("Fixed 5 seconds")
+                                    .selected(!self.settings_draft.progressive_seek)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.progressive_seek = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("progressive-seek-on")
+                                    .label("Increase each seek")
+                                    .selected(self.settings_draft.progressive_seek)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.progressive_seek = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(self.render_sleep_timer_settings(busy, cx))
+            .child(self.render_skip_silence_settings(busy, cx))
+            .child(self.render_crossfade_settings(busy, cx))
             .child(
                 v_flex()
                     .gap_4()
@@ -19293,12 +23892,193 @@ impl MetrolistShell {
                     .child(
                         v_flex()
                             .gap_1()
+                            .child(div().font_semibold().child("Listening history duration"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Count a play after this much real playback. The same threshold is used for local history and enabled YouTube Music history sync."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .items_center()
+                            .child(div().w(px(28.)).text_xs().child("1 s"))
+                            .child(
+                                div().flex_1().min_w(px(160.)).child(
+                                    Slider::new(&self.history_duration_slider)
+                                        .horizontal()
+                                        .disabled(busy),
+                                ),
+                            )
+                            .child(div().w(px(42.)).text_xs().child("100 s")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(format!(
+                                "{} second{}",
+                                self.settings_draft.history_duration_seconds,
+                                if self.settings_draft.history_duration_seconds == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            )),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .max_w(px(680.))
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_5()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Privacy history"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Keep existing history while controlling whether new local plays and searches are saved."),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_sm().font_medium().child("Pause listening history"))
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("local-listening-history-record")
+                                            .label("Record plays")
+                                            .selected(
+                                                !self.settings_draft.pause_listening_history,
+                                            )
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settings_draft.pause_listening_history = false;
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("local-listening-history-pause")
+                                            .label("Pause")
+                                            .selected(
+                                                self.settings_draft.pause_listening_history,
+                                            )
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settings_draft.pause_listening_history = true;
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("settings-clear-listening-history")
+                                            .danger()
+                                            .label(if clearing_listening_history {
+                                                "Clearing…"
+                                            } else {
+                                                "Clear listening history"
+                                            })
+                                            .loading(clearing_listening_history)
+                                            .disabled(busy || listening_history_count == 0)
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.confirm_clear_history(
+                                                        listening_history_count,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            )),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_sm().font_medium().child("Pause search history"))
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("local-search-history-record")
+                                            .label("Save searches")
+                                            .selected(!self.settings_draft.pause_search_history)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settings_draft.pause_search_history = false;
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("local-search-history-pause")
+                                            .label("Pause")
+                                            .selected(self.settings_draft.pause_search_history)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settings_draft.pause_search_history = true;
+                                                this.settings_error = None;
+                                                this.settings_notice = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("settings-clear-search-history")
+                                            .danger()
+                                            .label(if clearing_search_history {
+                                                "Clearing…"
+                                            } else {
+                                                "Clear search history"
+                                            })
+                                            .loading(clearing_search_history)
+                                            .disabled(busy || search_history_count == 0)
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.confirm_clear_search_history(
+                                                        search_history_count,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            )),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .max_w(px(680.))
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_5()
+                    .child(
+                        v_flex()
+                            .gap_1()
                             .child(div().font_semibold().child("YouTube Music listening history"))
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("When signed in, register one remote play after 30 seconds. Local history is always kept separately on this device."),
+                                    .child("When signed in, register one remote play after 30 seconds. Local history is controlled separately above."),
                             ),
                     )
                     .child(
@@ -19401,7 +24181,46 @@ impl MetrolistShell {
                                 }),
                             ),
                         )
-                    }),
+                    })
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Pause music when muted"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Pause when the Metrolist volume reaches zero, then resume only if that mute action caused the pause."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("pause-on-mute-off")
+                                    .label("Keep playing")
+                                    .selected(!self.settings_draft.pause_on_mute)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.pause_on_mute = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("pause-on-mute-on")
+                                    .label("Pause and resume")
+                                    .selected(self.settings_draft.pause_on_mute)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.pause_on_mute = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             )
             .child(
                 v_flex()
@@ -19448,12 +24267,386 @@ impl MetrolistShell {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().font_semibold().child("Automatic radio"))
+                            .child(div().font_semibold().child("Queue persistence"))
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("When five or fewer queued songs remain, fetch anonymous YouTube Music radio recommendations and append them without duplicates."),
+                                    .child("Choose whether the current queue, song, playback position, and reusable source metadata return after restarting Metrolist."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new("persistent-queue-on")
+                                    .label("Restore last queue")
+                                    .selected(self.settings_draft.persistent_queue)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.persistent_queue = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("persistent-queue-off")
+                                    .label("Do not restore")
+                                    .selected(!self.settings_draft.persistent_queue)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.persistent_queue = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Auto radio queue"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Choose whether clicking a song in Search or Home starts its YouTube Music Radio or only that selected song. Play all is unchanged."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("auto-radio-queue-on")
+                                    .label("Start Radio")
+                                    .selected(self.settings_draft.auto_radio_queue)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_radio_queue = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("auto-radio-queue-off")
+                                    .label("Selected song only")
+                                    .selected(!self.settings_draft.auto_radio_queue)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_radio_queue = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Auto-download on like"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Automatically add a song to the existing offline download queue after it is successfully added to Favorites."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("auto-download-like-off")
+                                    .label("Off")
+                                    .selected(!self.settings_draft.auto_download_on_like)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_download_on_like = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("auto-download-like-on")
+                                    .label("Download favorites")
+                                    .selected(self.settings_draft.auto_download_on_like)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_download_on_like = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Autoplay"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("When Repeat is off, automatically play the next queued song after the current song ends."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("autoplay-on")
+                                    .label("On")
+                                    .selected(self.settings_draft.autoplay)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.autoplay = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("autoplay-off")
+                                    .label("Off")
+                                    .selected(!self.settings_draft.autoplay)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.autoplay = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Shuffle across new queues"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("When Shuffle is already on, keep it on when a normal collection replaces the queue."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("shuffle-across-queues-reset")
+                                    .label("Reset")
+                                    .selected(
+                                        !self.settings_draft.persistent_shuffle_across_queues,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.persistent_shuffle_across_queues = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("shuffle-across-queues-keep")
+                                    .label("Keep on")
+                                    .selected(
+                                        self.settings_draft.persistent_shuffle_across_queues,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.persistent_shuffle_across_queues = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Shuffle playlist or album first"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("While shuffling, finish the original playlist or album before later queued and Automatic radio songs."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("shuffle-primary-mix")
+                                    .label("Mix all")
+                                    .selected(!self.settings_draft.shuffle_playlist_first)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.shuffle_playlist_first = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("shuffle-primary-first")
+                                    .label("Original first")
+                                    .selected(self.settings_draft.shuffle_playlist_first)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.shuffle_playlist_first = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Remember Shuffle and Repeat"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Restore both queue modes after restarting Metrolist without changing their current values when this setting is saved."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("remember-queue-modes-on")
+                                    .label("On")
+                                    .selected(self.settings_draft.remember_shuffle_and_repeat)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.remember_shuffle_and_repeat = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("remember-queue-modes-off")
+                                    .label("Off")
+                                    .selected(!self.settings_draft.remember_shuffle_and_repeat)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.remember_shuffle_and_repeat = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .child("Prevent duplicate tracks in queue"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("When an added song already exists in the queue, move its non-playing copies from their previous positions instead of adding another copy."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("queue-duplicates-allow")
+                                    .label("Allow duplicates")
+                                    .selected(
+                                        !self.settings_draft.prevent_duplicate_tracks_in_queue,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.prevent_duplicate_tracks_in_queue =
+                                            false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("queue-duplicates-move")
+                                    .label("Move existing")
+                                    .selected(
+                                        self.settings_draft.prevent_duplicate_tracks_in_queue,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.prevent_duplicate_tracks_in_queue = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Auto skip on playback error"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("After the existing playback recovery attempt fails, continue with the next queued song. Repeated failures stop automatically."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("auto-skip-error-off")
+                                    .label("Stop on error")
+                                    .selected(!self.settings_draft.auto_skip_next_on_error)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_skip_next_on_error = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("auto-skip-error-on")
+                                    .label("Skip next")
+                                    .selected(self.settings_draft.auto_skip_next_on_error)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_skip_next_on_error = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .max_w(px(680.))
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_5()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Similar content"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("When an ordinary eligible queue has five or fewer songs remaining, start similar YouTube Music recommendations."),
                             ),
                     )
                     .child(
@@ -19478,6 +24671,88 @@ impl MetrolistShell {
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.settings_draft.auto_radio = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Auto load more"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("When an active Radio queue has a next page and five or fewer songs remain, append it automatically."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("auto-load-more-on")
+                                    .label("Load next page")
+                                    .selected(self.settings_draft.auto_load_more)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_load_more = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("auto-load-more-off")
+                                    .label("Do not auto-load")
+                                    .selected(!self.settings_draft.auto_load_more)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.auto_load_more = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Repeat All behavior"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Choose whether Automatic radio can add more songs while Repeat All is active."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("repeat-all-radio-keep-loading")
+                                    .label("Keep loading")
+                                    .selected(
+                                        !self.settings_draft.disable_load_more_when_repeat_all,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.disable_load_more_when_repeat_all = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("repeat-all-radio-do-not-load")
+                                    .label("Do not load")
+                                    .selected(
+                                        self.settings_draft.disable_load_more_when_repeat_all,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.disable_load_more_when_repeat_all = true;
                                         this.settings_error = None;
                                         this.settings_notice = None;
                                         cx.notify();
@@ -19541,6 +24816,88 @@ impl MetrolistShell {
                             )),
                     ),
             )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .max_w(px(680.))
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_5()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child("Storage cleanup"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "Clear reusable caches independently or remove all {download_count} explicit offline download record(s)."
+                                    )),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("clear-playback-cache")
+                                    .label(if self.storage_operation
+                                        == StorageOperation::ClearingPlaybackCache
+                                    {
+                                        "Clearing playback cache…"
+                                    } else {
+                                        "Clear playback cache"
+                                    })
+                                    .loading(
+                                        self.storage_operation
+                                            == StorageOperation::ClearingPlaybackCache,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_clear_playback_cache(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("clear-artwork-cache")
+                                    .label(if self.storage_operation
+                                        == StorageOperation::ClearingArtworkCache
+                                    {
+                                        "Clearing artwork cache…"
+                                    } else {
+                                        "Clear artwork cache"
+                                    })
+                                    .loading(
+                                        self.storage_operation
+                                            == StorageOperation::ClearingArtworkCache,
+                                    )
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_clear_artwork_cache(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("remove-all-downloads-settings")
+                                    .danger()
+                                    .label(if self.storage_operation
+                                        == StorageOperation::RemovingDownloads
+                                    {
+                                        "Removing downloads…"
+                                    } else {
+                                        "Remove all downloads"
+                                    })
+                                    .loading(
+                                        self.storage_operation
+                                            == StorageOperation::RemovingDownloads,
+                                    )
+                                    .disabled(busy || download_count == 0)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_remove_all_downloads(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
             .when_some(self.settings_error.clone(), |page, error| {
                 page.child(
                     div()
@@ -19571,7 +24928,13 @@ impl MetrolistShell {
                     .child(
                         Button::new("settings-apply")
                             .primary()
-                            .label(if busy { "Applying…" } else { "Save and apply" })
+                            .label(
+                                if self.settings_operation == SettingsOperation::Applying {
+                                    "Applying…"
+                                } else {
+                                    "Save and apply"
+                                },
+                            )
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.apply_settings(window, cx)
@@ -19602,7 +24965,179 @@ impl MetrolistShell {
         }
     }
 
+    fn sleep_timer_button_label(&self) -> String {
+        match self.sleep_timer {
+            None => "Timer".into(),
+            Some(SleepTimer::EndOfSong { .. }) => "Song end".into(),
+            Some(SleepTimer::Deadline { deadline, .. }) => {
+                format_duration(deadline.saturating_duration_since(Instant::now()))
+            }
+        }
+    }
+
+    fn render_sleep_timer_button(
+        &self,
+        id: &'static str,
+        host_controlled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity();
+        let no_song = self.current_song.is_none();
+        let custom_minutes = self.sleep_timer_minutes;
+        let active = self.sleep_timer.is_some();
+        Button::new(id)
+            .ghost()
+            .compact()
+            .icon(IconName::Moon)
+            .label(self.sleep_timer_button_label())
+            .tooltip(self.sleep_timer.map_or_else(
+                || "Sleep timer".into(),
+                |timer| timer.summary(Instant::now()),
+            ))
+            .selected(active)
+            .disabled(host_controlled)
+            .dropdown_menu(move |menu, _, _| {
+                let start_in = |minutes: u64| {
+                    let view = view.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.start_sleep_timer_minutes(minutes, cx);
+                        });
+                    }
+                };
+                menu.item(
+                    PopupMenuItem::new("15 minutes")
+                        .disabled(no_song)
+                        .on_click(start_in(15)),
+                )
+                .item(
+                    PopupMenuItem::new("30 minutes")
+                        .disabled(no_song)
+                        .on_click(start_in(30)),
+                )
+                .item(
+                    PopupMenuItem::new("60 minutes")
+                        .disabled(no_song)
+                        .on_click(start_in(60)),
+                )
+                .item({
+                    let view = view.clone();
+                    PopupMenuItem::new("End of song")
+                        .disabled(no_song)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.start_end_of_song_sleep_timer(cx);
+                            });
+                        })
+                })
+                .separator()
+                .item({
+                    let view = view.clone();
+                    PopupMenuItem::new("Custom −5 min")
+                        .disabled(custom_minutes <= MIN_SLEEP_TIMER_MINUTES)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.adjust_sleep_timer_minutes(-5, cx);
+                            });
+                        })
+                })
+                .item({
+                    let view = view.clone();
+                    PopupMenuItem::new("Custom +5 min")
+                        .disabled(custom_minutes >= MAX_SLEEP_TIMER_MINUTES)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.adjust_sleep_timer_minutes(5, cx);
+                            });
+                        })
+                })
+                .item({
+                    let view = view.clone();
+                    PopupMenuItem::new(format!("Start custom ({custom_minutes} min)"))
+                        .disabled(no_song)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.start_custom_sleep_timer(cx);
+                            });
+                        })
+                })
+                .when(active, |menu| {
+                    let view = view.clone();
+                    menu.separator()
+                        .item(
+                            PopupMenuItem::new("Cancel timer").on_click(move |_, _, cx| {
+                                view.update(cx, |this, cx| {
+                                    this.cancel_sleep_timer(cx);
+                                });
+                            }),
+                        )
+                })
+            })
+    }
+
+    fn render_queue_toolbar(
+        &self,
+        id_prefix: &str,
+        host_controlled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                icon_ghost_button(
+                    format!("{id_prefix}-shuffle"),
+                    IconName::ChevronsUpDown,
+                    if self.shuffle_enabled {
+                        "Shuffle on"
+                    } else {
+                        "Shuffle off"
+                    },
+                )
+                .selected(self.shuffle_enabled)
+                .disabled(host_controlled || self.queue.is_empty())
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
+            )
+            .child(
+                icon_ghost_button(
+                    format!("{id_prefix}-repeat"),
+                    IconName::Redo2,
+                    self.repeat_mode.label(),
+                )
+                .selected(self.repeat_mode != RepeatMode::Off)
+                .disabled(host_controlled || self.queue.is_empty())
+                .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
+            )
+            .child(
+                Button::new(format!("{id_prefix}-clear-upcoming"))
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Delete)
+                    .label("Clear")
+                    .tooltip("Keep the current song and remove everything after it")
+                    .disabled(host_controlled || self.queue.remaining_after_current() == 0)
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx))),
+            )
+            .child(div().flex_1())
+            .child(self.render_sleep_timer_button(
+                if id_prefix == "now-playing" {
+                    "now-playing-sleep-timer"
+                } else {
+                    "queue-sleep-timer"
+                },
+                host_controlled,
+                cx,
+            ))
+    }
+
     fn render_queue_row(
+        &self,
         index: usize,
         item: QueueItem,
         current_index: Option<usize>,
@@ -19610,62 +25145,343 @@ impl MetrolistShell {
         host_controlled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_1()
-            .pb_1()
+        let is_current = current_index == Some(index);
+        let favorite = if item.song.is_episode {
+            self.is_episode_saved(&item.song.video_id)
+        } else {
+            self.is_favorite(&item.song.video_id)
+        };
+        let radio_matches = radio_state_matches_song(&self.radio_state, &item.song.video_id);
+        let radio_loading =
+            radio_matches && matches!(self.radio_state, RadioQueueState::Loading(_));
+        let cloud_liked = self.cloud_video_liked(&item.song.video_id);
+        let metadata_refreshing =
+            self.song_metadata_refreshing.as_deref() == Some(item.song.video_id.as_str());
+        let metadata_refresh_busy = self.song_metadata_refreshing.is_some();
+        let artist_items = song_artist_browse_items(&item.song);
+        let album_item = song_album_browse_item(&item.song);
+        let duration = item
+            .song
+            .duration
+            .map(format_duration)
+            .unwrap_or_else(|| "—".into());
+        let download_state = self
+            .download_for(&item.song.video_id)
+            .map(|download| download.state);
+        let downloads_ready = matches!(self.downloads_state, StoredViewState::Loaded(_));
+        let download_label = match download_state {
+            Some(DownloadState::Completed) => "Remove offline",
+            Some(DownloadState::Queued | DownloadState::Downloading) => "Pause download",
+            Some(DownloadState::Paused | DownloadState::Failed) => "Resume download",
+            None if downloads_ready => "Download",
+            None => "Loading downloads…",
+        };
+        let view = cx.entity();
+        let account_ready = self.account_ready();
+        let more = Button::new(format!("queue-more-{index}"))
+            .ghost()
+            .compact()
+            .icon(IconName::Ellipsis)
+            .tooltip("More actions")
+            .dropdown_menu({
+                let song = item.song.clone();
+                let view = view.clone();
+                let artist_items = artist_items.clone();
+                let album_item = album_item.clone();
+                move |menu, _, _| {
+                    let mut menu = menu
+                        .item(
+                            PopupMenuItem::new(if radio_loading {
+                                "Starting radio…"
+                            } else if radio_matches {
+                                "Radio playing"
+                            } else {
+                                "Start radio"
+                            })
+                            .disabled(host_controlled || song.is_episode || radio_loading)
+                            .on_click({
+                                let view = view.clone();
+                                let song = song.clone();
+                                shell_menu_action(view, move |this, window, cx| {
+                                    this.start_radio_from_song(song.clone(), window, cx);
+                                })
+                            }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Play next")
+                                .disabled(host_controlled)
+                                .on_click({
+                                    let view = view.clone();
+                                    let song = song.clone();
+                                    shell_menu_action(view, move |this, window, cx| {
+                                        this.play_song_next(song.clone(), window, cx);
+                                    })
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Add to queue")
+                                .disabled(host_controlled)
+                                .on_click({
+                                    let view = view.clone();
+                                    let song = song.clone();
+                                    shell_menu_action(view, move |this, window, cx| {
+                                        this.add_song_to_queue(song.clone(), window, cx);
+                                    })
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(if song.is_episode && favorite {
+                                "Remove from Later"
+                            } else if song.is_episode {
+                                "Save for Later"
+                            } else if favorite {
+                                "Remove favourite"
+                            } else {
+                                "Add to favourites"
+                            })
+                            .on_click({
+                                let view = view.clone();
+                                let song = song.clone();
+                                shell_menu_action(view, move |this, _, cx| {
+                                    if song.is_episode {
+                                        this.toggle_episode_for_later(song.clone(), cx);
+                                    } else {
+                                        this.toggle_favorite(song.clone(), cx);
+                                    }
+                                })
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Add to playlist").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.open_playlist_picker(song.clone(), cx);
+                            })
+                        }));
+                    if account_ready && !song.is_episode {
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new(if cloud_liked {
+                                    "Unlike on YouTube Music"
+                                } else {
+                                    "Like on YouTube Music"
+                                })
+                                .on_click({
+                                    let view = view.clone();
+                                    let song = song.clone();
+                                    shell_menu_action(view, move |this, _, cx| {
+                                        this.set_cloud_video_liked(song.clone(), !cloud_liked, cx);
+                                    })
+                                }),
+                            )
+                            .item(PopupMenuItem::new("Add to YouTube playlist").on_click({
+                                let view = view.clone();
+                                let song = song.clone();
+                                shell_menu_action(view, move |this, _, cx| {
+                                    this.open_cloud_playlist_picker(song.clone(), cx);
+                                })
+                            }));
+                    }
+                    menu = menu
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(download_label)
+                                .disabled(!downloads_ready)
+                                .on_click({
+                                    let view = view.clone();
+                                    let song = song.clone();
+                                    shell_menu_action(view, move |this, window, cx| {
+                                        match download_state {
+                                            Some(DownloadState::Completed) => {
+                                                this.confirm_remove_download(
+                                                    song.video_id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                            Some(
+                                                DownloadState::Queued | DownloadState::Downloading,
+                                            ) => {
+                                                this.pause_download(&song.video_id, cx);
+                                            }
+                                            Some(DownloadState::Paused | DownloadState::Failed) => {
+                                                this.retry_download(&song.video_id, cx);
+                                            }
+                                            None => this.queue_song_download(song.clone(), cx),
+                                        }
+                                    })
+                                }),
+                        )
+                        .item(PopupMenuItem::new("Copy link").on_click({
+                            let view = view.clone();
+                            let video_id = song.video_id.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.copy_song_link(&video_id, cx);
+                            })
+                        }))
+                        .item(
+                            PopupMenuItem::new(if metadata_refreshing {
+                                "Refreshing details…"
+                            } else {
+                                "Refresh details"
+                            })
+                            .disabled(host_controlled || metadata_refresh_busy)
+                            .on_click({
+                                let view = view.clone();
+                                let video_id = song.video_id.clone();
+                                shell_menu_action(view, move |this, _, cx| {
+                                    this.refresh_song_metadata(video_id.clone(), cx);
+                                })
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Details").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.open_media_info_panel(song.clone(), cx);
+                            })
+                        }));
+                    for artist in artist_items.clone() {
+                        let label = format!("Artist: {}", artist.title);
+                        menu = menu.item(PopupMenuItem::new(label).on_click({
+                            let view = view.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.queue_visible = false;
+                                this.now_playing_visible = false;
+                                this.open_online_browse(artist.clone(), cx);
+                            })
+                        }));
+                    }
+                    if let Some(album) = album_item.clone() {
+                        let label = format!("Album: {}", album.title);
+                        menu = menu.item(PopupMenuItem::new(label).on_click({
+                            let view = view.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.queue_visible = false;
+                                this.now_playing_visible = false;
+                                this.open_online_browse(album.clone(), cx);
+                            })
+                        }));
+                    }
+                    menu.separator()
+                        .item(
+                            PopupMenuItem::new("Move up")
+                                .disabled(host_controlled || index == 0)
+                                .on_click({
+                                    let view = view.clone();
+                                    shell_menu_action(view, move |this, _, cx| {
+                                        this.move_queue_item(index, index.saturating_sub(1), cx);
+                                    })
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Move down")
+                                .disabled(host_controlled || index.saturating_add(1) >= queue_len)
+                                .on_click({
+                                    let view = view.clone();
+                                    shell_menu_action(view, move |this, _, cx| {
+                                        this.move_queue_item(index, index.saturating_add(1), cx);
+                                    })
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Remove from queue")
+                                .disabled(host_controlled)
+                                .on_click({
+                                    let view = view.clone();
+                                    shell_menu_action(view, move |this, window, cx| {
+                                        this.remove_queue_item(index, window, cx);
+                                    })
+                                }),
+                        )
+                }
+            });
+
+        list_row_shell(SharedString::from(format!("queue-item-{index}")), cx)
+            .when(is_current, |row| row.bg(cx.theme().secondary))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if !host_controlled {
+                    this.play_queue_item(index, window, cx);
+                }
+            }))
             .child(
-                Button::new(format!("queue-item-{index}"))
-                    .ghost()
-                    .w_full()
-                    .justify_start()
-                    .label(format!("{}. {}", index + 1, item.song.title))
-                    .tooltip(item.song.artist_line())
-                    .selected(current_index == Some(index))
-                    .disabled(host_controlled)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_queue_item(index, window, cx);
-                    })),
+                div()
+                    .w(px(22.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(if is_current {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(if is_current {
+                        Icon::new(IconName::Play).size_4().into_any_element()
+                    } else {
+                        div().child((index + 1).to_string()).into_any_element()
+                    }),
+            )
+            .child(self.render_thumbnail(
+                item.song.thumbnail_url.as_deref(),
+                px(40.),
+                IconName::Play,
+                cx,
+            ))
+            .child(media_text_block(
+                item.song.title.clone(),
+                item.song.artist_line(),
+                None,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(duration),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .justify_end()
-                    .child(
-                        Button::new(format!("queue-move-up-{index}"))
-                            .ghost()
-                            .icon(IconName::ArrowUp)
-                            .label("Up")
-                            .tooltip("Move this item earlier in the queue")
-                            .disabled(host_controlled || index == 0)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.move_queue_item(index, index.saturating_sub(1), cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("queue-move-down-{index}"))
-                            .ghost()
-                            .icon(IconName::ArrowDown)
-                            .label("Down")
-                            .tooltip("Move this item later in the queue")
-                            .disabled(host_controlled || index.saturating_add(1) >= queue_len)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.move_queue_item(index, index.saturating_add(1), cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("queue-remove-{index}"))
-                            .danger()
-                            .icon(IconName::Delete)
-                            .label("Remove")
-                            .tooltip("Remove this item from the queue")
-                            .disabled(host_controlled)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.remove_queue_item(index, window, cx);
-                            })),
-                    ),
+                icon_ghost_button(
+                    format!("queue-favorite-{index}"),
+                    IconName::Heart,
+                    if favorite {
+                        "Remove from favourites"
+                    } else {
+                        "Add to favourites"
+                    },
+                )
+                .selected(favorite)
+                .disabled(if item.song.is_episode {
+                    self.podcast_busy()
+                } else {
+                    self.library_busy()
+                })
+                .on_click(cx.listener({
+                    let favorite_song = item.song.clone();
+                    move |this, _, _, cx| {
+                        if favorite_song.is_episode {
+                            this.toggle_episode_for_later(favorite_song.clone(), cx);
+                        } else {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        }
+                    }
+                })),
             )
+            .child(
+                icon_ghost_button(
+                    format!("queue-remove-{index}"),
+                    IconName::Delete,
+                    "Remove from queue",
+                )
+                .disabled(host_controlled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.remove_queue_item(index, window, cx);
+                })),
+            )
+            .child(more)
             .into_any_element()
     }
 
@@ -19711,7 +25527,11 @@ impl MetrolistShell {
                     .title
                     .clone()
                     .unwrap_or_else(|| "Radio active".into()),
-                "More recommendations will load near the end of the queue.".to_owned(),
+                if self.settings.auto_load_more {
+                    "More recommendations will load near the end of the queue.".to_owned()
+                } else {
+                    "Auto load more is off; the loaded Radio page will play to its end.".to_owned()
+                },
                 false,
                 false,
             ),
@@ -19767,144 +25587,7 @@ impl MetrolistShell {
                         }),
                     )),
             )
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .m_3()
-                    .mb_0()
-                    .child(
-                        Button::new("queue-shuffle")
-                            .ghost()
-                            .flex_1()
-                            .label(if self.shuffle_enabled {
-                                "Shuffle on"
-                            } else {
-                                "Shuffle"
-                            })
-                            .tooltip("Randomize the remaining queue")
-                            .selected(self.shuffle_enabled)
-                            .disabled(host_controlled || self.queue.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_shuffle(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("queue-repeat")
-                            .ghost()
-                            .flex_1()
-                            .label(self.repeat_mode.label())
-                            .tooltip("Cycle repeat off, repeat all, and repeat one")
-                            .selected(self.repeat_mode != RepeatMode::Off)
-                            .disabled(host_controlled || self.queue.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cycle_repeat_mode(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("queue-clear-upcoming")
-                            .danger()
-                            .flex_1()
-                            .label("Clear upcoming")
-                            .tooltip("Keep the current song and remove everything after it")
-                            .disabled(host_controlled || self.queue.remaining_after_current() == 0)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.clear_upcoming_queue(cx);
-                            })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .m_3()
-                    .mb_0()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_3()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().text_sm().font_medium().child("Sleep timer"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(self.sleep_timer.map_or_else(
-                                        || "Off".into(),
-                                        |timer| timer.summary(Instant::now()),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("sleep-timer-15")
-                                    .ghost()
-                                    .label("15 min")
-                                    .disabled(host_controlled || self.current_song.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_sleep_timer(
-                                            SleepTimer::Deadline(
-                                                Instant::now() + Duration::from_secs(15 * 60),
-                                            ),
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("sleep-timer-30")
-                                    .ghost()
-                                    .label("30 min")
-                                    .disabled(host_controlled || self.current_song.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_sleep_timer(
-                                            SleepTimer::Deadline(
-                                                Instant::now() + Duration::from_secs(30 * 60),
-                                            ),
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("sleep-timer-60")
-                                    .ghost()
-                                    .label("60 min")
-                                    .disabled(host_controlled || self.current_song.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_sleep_timer(
-                                            SleepTimer::Deadline(
-                                                Instant::now() + Duration::from_secs(60 * 60),
-                                            ),
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("sleep-timer-song-end")
-                                    .ghost()
-                                    .label("End of song")
-                                    .disabled(host_controlled || self.current_song.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_sleep_timer(SleepTimer::EndOfSong, cx);
-                                    })),
-                            )
-                            .when(self.sleep_timer.is_some(), |actions| {
-                                actions.child(
-                                    Button::new("sleep-timer-cancel")
-                                        .danger()
-                                        .label("Cancel")
-                                        .disabled(host_controlled)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_sleep_timer(cx);
-                                        })),
-                                )
-                            }),
-                    ),
-            )
+            .child(self.render_queue_toolbar("queue", host_controlled, cx))
             .child(
                 v_flex()
                     .gap_2()
@@ -19963,7 +25646,7 @@ impl MetrolistShell {
                     .gap_1()
                     .p_3()
                     .children(items.into_iter().enumerate().map(|(index, item)| {
-                        Self::render_queue_row(
+                        self.render_queue_row(
                             index,
                             item,
                             current_index,
@@ -20227,10 +25910,10 @@ impl MetrolistShell {
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                         .child("−12 to +12 semitones"),
-                                ),
-                        )
-                    })
-                    .child(
+                    ),
+                )
+            })
+            .child(
                         Button::new("live-playback-parameters-reset")
                             .label("Reset to 1.00× / 0 st")
                             .disabled(
@@ -20432,8 +26115,13 @@ impl MetrolistShell {
     }
 
     fn render_playlist_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(song) = self.playlist_picker_song.clone() else {
+        let Some(songs) = self.playlist_picker_song.clone() else {
             return div().into_any_element();
+        };
+        let picker_summary = if songs.len() == 1 {
+            songs[0].title.clone()
+        } else {
+            format!("{} tracks", songs.len())
         };
         let content = match &self.playlists_state {
             StoredViewState::Loading => v_flex()
@@ -20472,7 +26160,7 @@ impl MetrolistShell {
                 .gap_2()
                 .p_3()
                 .children(playlists.iter().map(|playlist| {
-                    let playlist_song = song.clone();
+                    let playlist_songs = songs.clone();
                     let playlist_id = playlist.id;
                     Button::new(format!("picker-playlist-{playlist_id}"))
                         .w_full()
@@ -20481,7 +26169,7 @@ impl MetrolistShell {
                         .label(playlist.name.clone())
                         .tooltip(format!("{} songs", playlist.song_count))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_song_to_playlist(playlist_id, playlist_song.clone(), cx);
+                            this.add_songs_to_playlist(playlist_id, playlist_songs.clone(), cx);
                         }))
                         .into_any_element()
                 }))
@@ -20511,7 +26199,7 @@ impl MetrolistShell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(song.title),
+                                    .child(picker_summary),
                             ),
                     )
                     .child(
@@ -20684,41 +26372,7 @@ impl MetrolistShell {
         v_flex()
             .size_full()
             .min_h_0()
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .p_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("now-playing-shuffle")
-                            .ghost()
-                            .label(if self.shuffle_enabled {
-                                "Shuffle on"
-                            } else {
-                                "Shuffle"
-                            })
-                            .selected(self.shuffle_enabled)
-                            .disabled(host_controlled || self.queue.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
-                    )
-                    .child(
-                        Button::new("now-playing-repeat")
-                            .ghost()
-                            .label(self.repeat_mode.label())
-                            .selected(self.repeat_mode != RepeatMode::Off)
-                            .disabled(host_controlled || self.queue.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
-                    )
-                    .child(
-                        Button::new("now-playing-clear-upcoming")
-                            .danger()
-                            .label("Clear upcoming")
-                            .disabled(host_controlled || self.queue.remaining_after_current() == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx))),
-                    ),
-            )
+            .child(self.render_queue_toolbar("now-playing", host_controlled, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -20732,7 +26386,7 @@ impl MetrolistShell {
                             .child("The queue is empty")
                     })
                     .children(items.into_iter().map(|(index, item)| {
-                        Self::render_queue_row(
+                        self.render_queue_row(
                             index,
                             item,
                             current_index,
@@ -20870,7 +26524,8 @@ impl MetrolistShell {
         let (recommendations, loading, error) = match &self.radio_state {
             _ if !state_matches_current => (Vec::new(), false, None),
             RadioQueueState::Idle => (Vec::new(), false, None),
-            RadioQueueState::Loading(RadioRequest::Initial { .. }) => (Vec::new(), true, None),
+            RadioQueueState::Loading(RadioRequest::Initial { .. })
+            | RadioQueueState::Loading(RadioRequest::Endpoint { .. }) => (Vec::new(), true, None),
             RadioQueueState::Loading(RadioRequest::Continuation(session)) => {
                 (session.recommendations.clone(), true, None)
             }
@@ -20879,7 +26534,7 @@ impl MetrolistShell {
             }
             RadioQueueState::Failed(request, message) => {
                 let songs = match request {
-                    RadioRequest::Initial { .. } => Vec::new(),
+                    RadioRequest::Initial { .. } | RadioRequest::Endpoint { .. } => Vec::new(),
                     RadioRequest::Continuation(session) => session.recommendations.clone(),
                 };
                 (songs, false, Some(message.clone()))
@@ -20957,56 +26612,439 @@ impl MetrolistShell {
                             .enumerate()
                             .map(|(index, song)| {
                                 let play_song = song.clone();
-                                h_flex()
-                                    .flex_wrap()
-                                    .w_full()
-                                    .gap_3()
-                                    .items_center()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .p_3()
-                                    .child(self.render_thumbnail(
-                                        song.thumbnail_url.as_deref(),
-                                        px(44.),
+                                list_row_shell(
+                                    SharedString::from(format!("now-playing-related-{index}")),
+                                    cx,
+                                )
+                                .child(self.render_thumbnail(
+                                    song.thumbnail_url.as_deref(),
+                                    px(44.),
+                                    IconName::Play,
+                                    cx,
+                                ))
+                                .child(media_text_block(
+                                    song.title.clone(),
+                                    song.artist_line(),
+                                    None,
+                                    cx,
+                                ))
+                                .child(self.queue_insert_buttons(
+                                    format!("now-playing-related-{index}"),
+                                    &song,
+                                    cx,
+                                ))
+                                .child(
+                                    icon_ghost_button(
+                                        format!("now-playing-related-play-{index}"),
                                         IconName::Play,
-                                        cx,
-                                    ))
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(div().font_medium().child(song.title.clone()))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(song.artist_line()),
-                                            ),
+                                        "Play",
                                     )
-                                    .child(self.queue_insert_buttons(
-                                        format!("now-playing-related-{index}"),
-                                        &song,
-                                        cx,
-                                    ))
-                                    .child(
-                                        Button::new(format!("now-playing-related-play-{index}"))
-                                            .ghost()
-                                            .icon(IconName::Play)
-                                            .label("Play")
-                                            .disabled(host_controlled)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.play_song_collection(
-                                                    vec![play_song.clone()],
-                                                    0,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                    )
-                                    .into_any_element()
+                                    .disabled(host_controlled)
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.play_song_collection(
+                                                vec![play_song.clone()],
+                                                0,
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                )
+                                .into_any_element()
                             }),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_song_details_content(
+        &self,
+        song: &Song,
+        id_prefix: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let link = format!("https://music.youtube.com/watch?v={}", song.video_id);
+        let download = self.download_for(&song.video_id).map_or_else(
+            || "Not downloaded".to_owned(),
+            |download| download.state.label().to_owned(),
+        );
+        let live_info = self
+            .media_info_state
+            .as_ref()
+            .and_then(|state| match state {
+                MediaInfoViewState::Loaded(state_song, info)
+                    if state_song.video_id == song.video_id =>
+                {
+                    Some(info.clone())
+                }
+                _ => None,
+            });
+        let loading = matches!(
+            self.media_info_state.as_ref(),
+            Some(MediaInfoViewState::Loading(state_song)) if state_song.video_id == song.video_id
+        );
+        let error = self
+            .media_info_state
+            .as_ref()
+            .and_then(|state| match state {
+                MediaInfoViewState::Failed(state_song, message)
+                    if state_song.video_id == song.video_id =>
+                {
+                    Some(message.clone())
+                }
+                _ => None,
+            });
+        let mut details: Vec<(&'static str, String)> = vec![
+            (
+                "Title",
+                live_info
+                    .as_ref()
+                    .and_then(|info| info.title.clone())
+                    .unwrap_or_else(|| song.title.clone()),
+            ),
+            ("Artists", song.artist_line()),
+            (
+                "Album",
+                song.album
+                    .as_ref()
+                    .map_or_else(|| "—".into(), |album| album.title.clone()),
+            ),
+            (
+                "Type",
+                if song.is_episode { "Episode" } else { "Song" }.into(),
+            ),
+            (
+                "Duration",
+                song.duration
+                    .map_or_else(|| "Unknown".into(), format_duration),
+            ),
+            ("Offline", download),
+            ("Video ID", song.video_id.clone()),
+            ("YouTube Music link", link),
+        ];
+        if let Some(info) = &live_info {
+            if let Some(value) = info.author.clone() {
+                details.push(("YouTube author", value));
+            }
+            if let Some(value) = info.author_id.clone() {
+                details.push(("Author channel ID", value));
+            }
+            if let Some(value) = info.upload_date.clone() {
+                details.push(("Upload date", value));
+            }
+            if let Some(value) = info.subscribers.clone() {
+                details.push(("Subscribers", value));
+            }
+            if let Some(value) = info.view_count {
+                details.push(("Views", format_count(value)));
+            }
+            if let Some(value) = info.likes {
+                details.push(("Likes", format_count(value)));
+            }
+            if let Some(value) = info.dislikes {
+                details.push(("Dislikes", format_count(value)));
+            }
+            if let Some(value) = info
+                .description
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            {
+                details.push(("Description", value));
+            }
+        }
+
+        v_flex()
+            .gap_3()
+            .when(loading, |layout| {
+                layout.child(
+                    div()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .p_3()
+                        .text_sm()
+                        .child("Loading live YouTube details…"),
+                )
+            })
+            .when_some(error, |layout, message| {
+                let retry_song = song.clone();
+                layout.child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().danger.opacity(0.12))
+                        .text_color(cx.theme().danger)
+                        .p_3()
+                        .text_sm()
+                        .child(div().flex_1().child(message))
+                        .child(
+                            Button::new(format!("{id_prefix}-retry"))
+                                .label("Retry")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.load_media_info(retry_song.clone(), true, cx);
+                                })),
+                        ),
+                )
+            })
+            .when_some(self.now_playing_notice.clone(), |layout, notice| {
+                layout.child(
+                    div()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().success.opacity(0.12))
+                        .text_color(cx.theme().success)
+                        .p_3()
+                        .text_sm()
+                        .child(notice),
+                )
+            })
+            .children(
+                details
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, value))| {
+                        let copy_value = value.clone();
+                        h_flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_3()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p_3()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(div().text_sm().child(value)),
+                            )
+                            .child(
+                                icon_ghost_button(
+                                    format!("{id_prefix}-copy-{index}"),
+                                    IconName::Copy,
+                                    format!("Copy {label}"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.copy_detail_value(label, copy_value.clone(), cx);
+                                    },
+                                )),
+                            )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_now_playing_details(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(song) = self.current_song.as_ref() else {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .child("Nothing playing")
+                .into_any_element();
+        };
+        let video_id = song.video_id.clone();
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .gap_3()
+            .p_4()
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().text_lg().font_semibold().child("Song details"))
+                    .child(
+                        Button::new("now-playing-details-copy-link")
+                            .icon(IconName::Copy)
+                            .label("Copy link")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_song_link(&video_id, cx);
+                            })),
+                    ),
+            )
+            .child(self.render_song_details_content(song, "now-playing-details", cx))
+            .into_any_element()
+    }
+
+    fn render_now_playing_equalizer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let equalizer = &self.settings.equalizer;
+        let current = if !equalizer.enabled {
+            "Off".to_owned()
+        } else if let Some(profile) = &equalizer.active_profile {
+            profile.name.clone()
+        } else {
+            equalizer
+                .preset()
+                .map(|preset| preset.label().to_owned())
+                .unwrap_or_else(|| "Custom ten-band EQ".into())
+        };
+        let busy = self.equalizer_operation != EqualizerOperation::Idle
+            || self.settings_operation == SettingsOperation::Applying
+            || self.playback_parameters_pending.is_some();
+
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .gap_4()
+            .p_4()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_lg().font_semibold().child("Equalizer"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("Active: {current}")),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(EqualizerPreset::ALL.into_iter().map(|preset| {
+                        let selected = if preset == EqualizerPreset::Flat {
+                            !equalizer.enabled
+                        } else {
+                            equalizer.enabled
+                                && equalizer.active_profile.is_none()
+                                && equalizer.preset() == Some(preset)
+                        };
+                        Button::new(format!(
+                            "now-playing-equalizer-{}",
+                            preset.label().to_lowercase()
+                        ))
+                        .label(if preset == EqualizerPreset::Flat {
+                            "Off"
+                        } else {
+                            preset.label()
+                        })
+                        .selected(selected)
+                        .disabled(busy || selected)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.request_equalizer_preset_change(preset, cx);
+                        }))
+                    })),
+            )
+            .when(busy, |content| {
+                content.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Applying equalizer to the audio chain…"),
+                )
+            })
+            .when_some(self.equalizer_notice.clone(), |content, notice| {
+                content.child(
+                    div()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().success.opacity(0.1))
+                        .text_color(cx.theme().success)
+                        .p_3()
+                        .text_sm()
+                        .child(notice),
+                )
+            })
+            .when_some(self.equalizer_error.clone(), |content, error| {
+                content.child(
+                    div()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().danger.opacity(0.1))
+                        .text_color(cx.theme().danger)
+                        .p_3()
+                        .text_sm()
+                        .child(error),
+                )
+            })
+            .child(
+                v_flex()
+                    .gap_2()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_3()
+                    .child(div().font_medium().child("Full equalizer settings"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Import or choose AutoEQ/APO profiles and edit all ten frequency bands."),
+                    )
+                    .child(
+                        Button::new("now-playing-equalizer-settings")
+                            .label("Open settings")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.now_playing_visible = false;
+                                this.navigate(Route::Settings, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_media_info_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = self.media_info_state.as_ref() else {
+            return div().into_any_element();
+        };
+        let song = state.song();
+        v_flex()
+            .h_full()
+            .w(px(400.))
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                h_flex()
+                    .h(px(72.))
+                    .px_4()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().font_semibold().child("Song details"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(song.title.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new("close-media-info-panel")
+                            .ghost()
+                            .label("Close")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_media_info_panel(cx);
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .gap_3()
+                    .p_3()
+                    .child(self.render_song_details_content(song, "media-info-panel", cx)),
             )
             .into_any_element()
     }
@@ -21032,26 +27070,41 @@ impl MetrolistShell {
             NowPlayingTab::UpNext => self.render_now_playing_queue(cx),
             NowPlayingTab::Lyrics => self.render_now_playing_lyrics(cx),
             NowPlayingTab::Related => self.render_now_playing_related(cx),
+            NowPlayingTab::Details => self.render_now_playing_details(cx),
+            NowPlayingTab::Equalizer => self.render_now_playing_equalizer(cx),
         };
-        let favorite = self.is_favorite(&song.video_id);
+        let favorite = if song.is_episode {
+            self.is_episode_saved(&song.video_id)
+        } else {
+            self.is_favorite(&song.video_id)
+        };
         let favorite_song = song.clone();
+        let speed_dial_pinned = self.is_speed_dial_song(&song.video_id);
+        let speed_dial_song = song.clone();
         let local_playlist_song = song.clone();
+        let copy_link_video_id = song.video_id.clone();
+        let refresh_video_id = song.video_id.clone();
+        let metadata_refreshing =
+            self.song_metadata_refreshing.as_deref() == Some(song.video_id.as_str());
+        let metadata_refresh_busy = self.song_metadata_refreshing.is_some();
+        let host_controlled = self.listen_together_is_guest();
         let cloud_liked = self.cloud_video_liked(&song.video_id);
         let cloud_like_song = song.clone();
+        let cloud_in_library = self.cloud_video_in_library(&song.video_id);
+        let cloud_library_song = song.clone();
         let cloud_playlist_song = song.clone();
-        let artist_item = song.artists.iter().find_map(|artist| {
-            artist.id.as_ref().map(|id| BrowseItem {
-                browse_id: id.clone(),
-                kind: BrowseKind::Artist,
-                title: artist.name.clone(),
-                subtitle: "Artist".into(),
-                thumbnail_url: song.thumbnail_url.clone(),
-                params: None,
-                editable: false,
-            })
-        });
-        let artist_subscription = artist_item
-            .as_ref()
+        let episode_error = song
+            .is_episode
+            .then(|| self.podcast_error.clone())
+            .flatten();
+        let episode_notice = song
+            .is_episode
+            .then(|| self.podcast_notice.clone())
+            .flatten();
+        let artist_items = song_artist_browse_items(song);
+        let artist_count = artist_items.len();
+        let artist_subscription = artist_items
+            .first()
             .filter(|_| self.account_ready() && self.cloud_library().is_some())
             .map(|artist| {
                 (
@@ -21059,15 +27112,7 @@ impl MetrolistShell {
                     self.cloud_artist_subscribed(&artist.browse_id),
                 )
             });
-        let album_item = song.album.as_ref().map(|album| BrowseItem {
-            browse_id: album.browse_id.clone(),
-            kind: BrowseKind::Album,
-            title: album.title.clone(),
-            subtitle: "Album".into(),
-            thumbnail_url: album.thumbnail_url.clone(),
-            params: None,
-            editable: false,
-        });
+        let album_item = song_album_browse_item(song);
 
         v_flex()
             .size_full()
@@ -21092,13 +27137,12 @@ impl MetrolistShell {
                     .child(
                         v_flex()
                             .min_w_0()
+                            .flex_1()
                             .child(div().font_semibold().child("Now playing"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{} — {}", song.title, song.artist_line())),
-                            ),
+                            .child(caption_line(
+                                format!("{} — {}", song.title, song.artist_line()),
+                                cx.theme().muted_foreground,
+                            )),
                     ),
             )
             .child(
@@ -21115,30 +27159,81 @@ impl MetrolistShell {
                             .items_center()
                             .justify_center()
                             .gap_4()
-                            .child(self.render_thumbnail(
-                                song.thumbnail_url.as_deref(),
-                                art_size,
-                                IconName::Play,
-                                cx,
-                            ))
+                            .child(
+                                div()
+                                    .relative()
+                                    .size(art_size)
+                                    .flex_shrink_0()
+                                    .child(self.render_thumbnail(
+                                        song.thumbnail_url.as_deref(),
+                                        art_size,
+                                        IconName::Play,
+                                        cx,
+                                    ))
+                                    .when(!host_controlled, |artwork| {
+                                        artwork.child(
+                                            h_flex()
+                                                .absolute()
+                                                .inset_0()
+                                                .child(
+                                                    div()
+                                                        .id("now-playing-artwork-seek-back")
+                                                        .h_full()
+                                                        .flex_1()
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            |this, event: &ClickEvent, _, cx| {
+                                                                if event.click_count() >= 2
+                                                                    && event.click_count() % 2 == 0
+                                                                {
+                                                                    this.seek_from_artwork(
+                                                                        DesktopSeekDirection::Backward,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("now-playing-artwork-seek-forward")
+                                                        .h_full()
+                                                        .flex_1()
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            |this, event: &ClickEvent, _, cx| {
+                                                                if event.click_count() >= 2
+                                                                    && event.click_count() % 2 == 0
+                                                                {
+                                                                    this.seek_from_artwork(
+                                                                        DesktopSeekDirection::Forward,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        )),
+                                                ),
+                                        )
+                                    }),
+                            )
                             .child(
                                 v_flex()
                                     .max_w(art_size)
+                                    .w(art_size)
                                     .items_center()
                                     .gap_1()
                                     .child(
-                                        div()
+                                        title_line(song.title.clone())
                                             .text_xl()
                                             .font_semibold()
-                                            .text_center()
-                                            .child(song.title.clone()),
+                                            .text_center(),
                                     )
                                     .child(
-                                        div()
-                                            .text_sm()
-                                            .text_center()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(song.artist_line()),
+                                        subtitle_line(
+                                            song.artist_line(),
+                                            cx.theme().muted_foreground,
+                                        )
+                                        .text_center(),
                                     ),
                             )
                             .child(
@@ -21151,13 +27246,62 @@ impl MetrolistShell {
                                         Button::new("now-playing-favorite")
                                             .ghost()
                                             .icon(IconName::Heart)
-                                            .label(if favorite { "Favorited" } else { "Favorite" })
+                                            .label(if song.is_episode && favorite {
+                                                "Saved for later"
+                                            } else if song.is_episode {
+                                                "Save for later"
+                                            } else if favorite {
+                                                "Favorited"
+                                            } else {
+                                                "Favorite"
+                                            })
                                             .selected(favorite)
-                                            .disabled(self.library_busy())
+                                            .disabled(if song.is_episode {
+                                                self.podcast_busy()
+                                            } else {
+                                                self.library_busy()
+                                            })
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.toggle_favorite(favorite_song.clone(), cx);
+                                                if favorite_song.is_episode {
+                                                    this.toggle_episode_for_later(
+                                                        favorite_song.clone(),
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.toggle_favorite(favorite_song.clone(), cx);
+                                                }
                                             })),
                                     )
+                                    .when(!song.is_episode, |actions| {
+                                        actions.child(
+                                            Button::new("now-playing-speed-dial")
+                                                .ghost()
+                                                .label(if speed_dial_pinned {
+                                                    "Unpin"
+                                                } else {
+                                                    "Pin"
+                                                })
+                                                .tooltip(if speed_dial_pinned {
+                                                    "Remove current song from Speed Dial"
+                                                } else {
+                                                    "Pin current song to Speed Dial"
+                                                })
+                                                .selected(speed_dial_pinned)
+                                                .disabled(
+                                                    self.speed_dial_busy.is_some()
+                                                        || !matches!(
+                                                            &self.speed_dial_state,
+                                                            StoredViewState::Loaded(_)
+                                                        ),
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.toggle_speed_dial_song(
+                                                        speed_dial_song.clone(),
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                    })
                                     .child(
                                         Button::new("now-playing-local-playlist")
                                             .ghost()
@@ -21165,6 +27309,48 @@ impl MetrolistShell {
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.open_playlist_picker(
                                                     local_playlist_song.clone(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(self.download_lifecycle_button(
+                                        "now-playing-download".into(),
+                                        song,
+                                        cx,
+                                    ))
+                                    .child(
+                                        Button::new("now-playing-copy-link")
+                                            .ghost()
+                                            .icon(IconName::Copy)
+                                            .label("Copy link")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.copy_song_link(&copy_link_video_id, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("now-playing-details")
+                                            .ghost()
+                                            .label("Details")
+                                            .selected(
+                                                self.now_playing_tab == NowPlayingTab::Details,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.select_now_playing_tab(3, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("now-playing-refresh-metadata")
+                                            .ghost()
+                                            .label(if metadata_refreshing {
+                                                "Refreshing…"
+                                            } else {
+                                                "Refresh"
+                                            })
+                                            .tooltip("Refetch song details from YouTube Music")
+                                            .disabled(host_controlled || metadata_refresh_busy)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.refresh_song_metadata(
+                                                    refresh_video_id.clone(),
                                                     cx,
                                                 );
                                             })),
@@ -21186,6 +27372,31 @@ impl MetrolistShell {
                                                             this.set_cloud_video_liked(
                                                                 cloud_like_song.clone(),
                                                                 !cloud_liked,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("now-playing-cloud-library")
+                                                    .ghost()
+                                                    .label(if cloud_in_library {
+                                                        "In library"
+                                                    } else {
+                                                        "Library +"
+                                                    })
+                                                    .tooltip(if cloud_in_library {
+                                                        "Remove from YouTube Music library"
+                                                    } else {
+                                                        "Add to YouTube Music library"
+                                                    })
+                                                    .selected(cloud_in_library)
+                                                    .disabled(self.cloud_busy())
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.set_cloud_song_in_library(
+                                                                cloud_library_song.clone(),
+                                                                !cloud_in_library,
                                                                 cx,
                                                             );
                                                         },
@@ -21231,17 +27442,28 @@ impl MetrolistShell {
                                             )
                                         },
                                     )
-                                    .when_some(artist_item, |actions, artist| {
-                                        actions.child(
-                                            Button::new("now-playing-open-artist")
-                                                .ghost()
-                                                .label("Artist")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    .children(artist_items.into_iter().enumerate().map(
+                                        |(artist_index, artist)| {
+                                            let label = if artist_count == 1 {
+                                                "Artist".to_owned()
+                                            } else {
+                                                artist.title.clone()
+                                            };
+                                            let tooltip = format!("Open artist: {}", artist.title);
+                                            Button::new(format!(
+                                                "now-playing-open-artist-{artist_index}"
+                                            ))
+                                            .ghost()
+                                            .label(label)
+                                            .tooltip(tooltip)
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
                                                     this.now_playing_visible = false;
                                                     this.open_online_browse(artist.clone(), cx);
-                                                })),
-                                        )
-                                    })
+                                                }),
+                                            )
+                                        },
+                                    ))
                                     .when_some(album_item, |actions, album| {
                                         actions.child(
                                             Button::new("now-playing-open-album")
@@ -21259,9 +27481,53 @@ impl MetrolistShell {
                                     div().text_xs().text_color(cx.theme().danger).child(message),
                                 )
                             })
+                            .when_some(self.speed_dial_error.clone(), |panel, message| {
+                                panel.child(
+                                    div().text_xs().text_color(cx.theme().danger).child(message),
+                                )
+                            })
                             .when_some(self.cloud_library_error.clone(), |panel, message| {
                                 panel.child(
                                     div().text_xs().text_color(cx.theme().danger).child(message),
+                                )
+                            })
+                            .when_some(episode_error, |panel, message| {
+                                panel.child(
+                                    div().text_xs().text_color(cx.theme().danger).child(message),
+                                )
+                            })
+                            .when_some(self.download_error.clone(), |panel, message| {
+                                panel.child(
+                                    div().text_xs().text_color(cx.theme().danger).child(message),
+                                )
+                            })
+                            .when_some(self.song_metadata_error.clone(), |panel, message| {
+                                panel.child(
+                                    div().text_xs().text_color(cx.theme().danger).child(message),
+                                )
+                            })
+                            .when_some(self.now_playing_notice.clone(), |panel, message| {
+                                panel.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().success)
+                                        .child(message),
+                                )
+                            })
+                            .when_some(self.speed_dial_notice.clone(), |panel, message| {
+                                panel.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().success)
+                                        .child(message),
+                                )
+                            })
+                            .when_some(episode_notice, |panel, message| {
+                                panel.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().success)
+                                        .child(message),
                                 )
                             }),
                     )
@@ -21293,7 +27559,9 @@ impl MetrolistShell {
                                             .label("Lyrics")
                                             .disabled(song.is_episode),
                                     )
-                                    .child(Tab::new().flex_1().label("Related")),
+                                    .child(Tab::new().flex_1().label("Related"))
+                                    .child(Tab::new().flex_1().label("Details"))
+                                    .child(Tab::new().flex_1().label("EQ")),
                             )
                             .child(pane),
                     ),
@@ -21302,7 +27570,7 @@ impl MetrolistShell {
     }
 
     fn render_player(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = window.viewport_size().width < px(1_050.);
+        let compact = window.viewport_size().width < px(980.);
         let snapshot = self.audio_player.snapshot();
         let state = if self.resolving_playback {
             PlaybackState::Loading
@@ -21319,6 +27587,31 @@ impl MetrolistShell {
             .playback_error
             .as_ref()
             .or(snapshot.error.as_ref())
+            .or(self.song_metadata_error.as_ref())
+            .or_else(|| {
+                self.current_song
+                    .as_ref()
+                    .filter(|song| song.is_episode)
+                    .and(self.podcast_error.as_ref())
+            })
+            .or_else(|| {
+                self.current_song
+                    .as_ref()
+                    .and(self.now_playing_notice.as_ref())
+            })
+            .or_else(|| {
+                self.current_song
+                    .as_ref()
+                    .filter(|song| song.is_episode)
+                    .and(self.podcast_notice.as_ref())
+            })
+            .or_else(|| self.current_song.as_ref().and(self.library_error.as_ref()))
+            .or_else(|| {
+                self.current_song
+                    .as_ref()
+                    .and(self.cloud_library_error.as_ref())
+            })
+            .or_else(|| self.current_song.as_ref().and(self.download_error.as_ref()))
             .cloned()
             .unwrap_or_else(|| match state {
                 PlaybackState::Loading => "Resolving and buffering audio…".into(),
@@ -21352,26 +27645,122 @@ impl MetrolistShell {
             .is_some_and(|song| radio_state_matches_song(&self.radio_state, &song.video_id));
         let radio_loading_current =
             radio_matches_current && matches!(self.radio_state, RadioQueueState::Loading(_));
+        let mini_actions = self.current_song.as_ref().map(|song| {
+            let favorite = if song.is_episode {
+                self.is_episode_saved(&song.video_id)
+            } else {
+                self.is_favorite(&song.video_id)
+            };
+            let favorite_song = song.clone();
+            let playlist_song = song.clone();
+            let artist_subscription = song
+                .artists
+                .iter()
+                .find_map(|artist| {
+                    artist
+                        .id
+                        .as_ref()
+                        .filter(|id| !id.trim().is_empty())
+                        .map(|id| (id.clone(), artist.name.clone()))
+                })
+                .filter(|_| self.account_ready() && self.cloud_library().is_some())
+                .map(|(channel_id, artist_name)| {
+                    let subscribed = self.cloud_artist_subscribed(&channel_id);
+                    (channel_id, artist_name, subscribed)
+                });
+
+            h_flex()
+                .flex_shrink_0()
+                .gap_1()
+                .child(
+                    icon_ghost_button(
+                        "mini-player-favorite",
+                        IconName::Heart,
+                        if song.is_episode && favorite {
+                            "Remove current episode from Episodes for Later"
+                        } else if song.is_episode {
+                            "Save current episode to Episodes for Later"
+                        } else if favorite {
+                            "Remove current song from favourites"
+                        } else {
+                            "Add current song to favourites"
+                        },
+                    )
+                    .selected(favorite)
+                    .disabled(if song.is_episode {
+                        self.podcast_busy()
+                    } else {
+                        self.library_busy()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if favorite_song.is_episode {
+                            this.toggle_episode_for_later(favorite_song.clone(), cx);
+                        } else {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        }
+                    })),
+                )
+                .child(
+                    icon_ghost_button(
+                        "mini-player-local-playlist",
+                        IconName::Plus,
+                        "Add current song to a local playlist",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_playlist_picker(playlist_song.clone(), cx);
+                    })),
+                )
+                .when_some(
+                    artist_subscription,
+                    |actions, (channel_id, artist_name, subscribed)| {
+                        actions.child(
+                            icon_ghost_button(
+                                "mini-player-subscribe",
+                                IconName::User,
+                                if subscribed {
+                                    format!("Unsubscribe from {artist_name}")
+                                } else {
+                                    format!("Subscribe to {artist_name}")
+                                },
+                            )
+                            .selected(subscribed)
+                            .disabled(self.cloud_busy())
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.set_cloud_subscription(
+                                        channel_id.clone(),
+                                        !subscribed,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    },
+                )
+                .into_any_element()
+        });
 
         h_flex()
-            .h(if compact { px(160.) } else { px(88.) })
+            .h(if compact { px(108.) } else { px(76.) })
             .flex_shrink_0()
             .flex_wrap()
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .when(!compact, |bar| bar.px_5().gap_5())
-            .when(compact, |bar| bar.px_4().py_2().gap_3())
+            .px_4()
+            .gap_3()
             .items_center()
             .child(
                 h_flex()
                     .id("open-now-playing")
-                    .w(if compact { px(220.) } else { px(240.) })
+                    .w(if compact { px(200.) } else { px(248.) })
+                    .min_w_0()
                     .gap_3()
                     .items_center()
                     .cursor_pointer()
                     .rounded(cx.theme().radius)
-                    .hover(|style| style.bg(cx.theme().muted.opacity(0.55)))
+                    .p_1()
+                    .hover(|style| style.bg(cx.theme().secondary))
                     .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(cx)))
                     .child(
                         self.render_thumbnail(
@@ -21387,42 +27776,39 @@ impl MetrolistShell {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_sm().font_medium().child(title))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(subtitle),
-                            ),
+                            .child(title_line(title).text_sm())
+                            .child(caption_line(subtitle, cx.theme().muted_foreground)),
                     )
                     .when(has_current_song, |metadata| {
                         metadata.child(Icon::new(IconName::Maximize).size_4())
                     }),
             )
+            .when_some(mini_actions, |player, actions| player.child(actions))
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w(px(360.))
-                    .gap_2()
+                    .min_w(px(280.))
+                    .gap_1()
                     .items_center()
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_1()
                             .child(
-                                Button::new("shuffle")
-                                    .ghost()
-                                    .label("Shuffle")
-                                    .tooltip("Randomize the remaining queue")
-                                    .selected(self.shuffle_enabled)
-                                    .disabled(host_controlled || self.queue.is_empty())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                icon_ghost_button(
+                                    "shuffle",
+                                    IconName::ChevronsUpDown,
+                                    "Randomize the remaining queue",
+                                )
+                                .selected(self.shuffle_enabled)
+                                .disabled(host_controlled || self.queue.is_empty())
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.toggle_shuffle(cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("previous")
-                                    .ghost()
-                                    .label(if compact { "Prev" } else { "Previous" })
+                                icon_ghost_button("previous", IconName::ArrowLeft, "Previous")
                                     .disabled(
                                         host_controlled
                                             || self.current_song.is_none()
@@ -21437,6 +27823,7 @@ impl MetrolistShell {
                             .child(
                                 Button::new("play")
                                     .primary()
+                                    .compact()
                                     .icon(play_icon)
                                     .tooltip(if state == PlaybackState::Playing {
                                         "Pause"
@@ -21449,9 +27836,7 @@ impl MetrolistShell {
                                     })),
                             )
                             .child(
-                                Button::new("next")
-                                    .ghost()
-                                    .label("Next")
+                                icon_ghost_button("next", IconName::ArrowRight, "Next")
                                     .disabled(
                                         host_controlled
                                             || self.current_song.is_none()
@@ -21463,15 +27848,21 @@ impl MetrolistShell {
                                     })),
                             )
                             .child(
-                                Button::new("repeat")
-                                    .ghost()
-                                    .label(self.repeat_mode.label())
-                                    .tooltip("Cycle repeat off, repeat all, and repeat one")
-                                    .selected(self.repeat_mode != RepeatMode::Off)
-                                    .disabled(host_controlled || self.queue.is_empty())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                icon_ghost_button(
+                                    "repeat",
+                                    IconName::Redo2,
+                                    format!(
+                                        "{} — cycle off, all, and one",
+                                        self.repeat_mode.label()
+                                    ),
+                                )
+                                .selected(self.repeat_mode != RepeatMode::Off)
+                                .disabled(host_controlled || self.queue.is_empty())
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.cycle_repeat_mode(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -21498,7 +27889,7 @@ impl MetrolistShell {
             )
             .child(
                 v_flex()
-                    .w(px(300.))
+                    .w(if compact { px(220.) } else { px(280.) })
                     .when(compact, |panel| panel.w_full())
                     .gap_1()
                     .child(
@@ -21508,9 +27899,9 @@ impl MetrolistShell {
                             .items_center()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("Volume {:.0}%", snapshot.volume * 100.0))
+                            .child(format!("{:.0}%", snapshot.volume * 100.0))
                             .child(
-                                div().flex_1().min_w(px(96.)).child(
+                                div().flex_1().min_w(px(72.)).child(
                                     Slider::new(&self.volume_slider)
                                         .horizontal()
                                         .disabled(host_controlled),
@@ -21533,6 +27924,7 @@ impl MetrolistShell {
                             .child(
                                 Button::new("playback-parameters")
                                     .ghost()
+                                    .compact()
                                     .label(format!(
                                         "{:.2}×",
                                         snapshot.playback_parameters.tempo_ratio()
@@ -21550,6 +27942,7 @@ impl MetrolistShell {
                             .child(
                                 Button::new("radio")
                                     .ghost()
+                                    .compact()
                                     .label("Radio")
                                     .selected(radio_matches_current)
                                     .disabled(
@@ -21568,6 +27961,7 @@ impl MetrolistShell {
                             .child(
                                 Button::new("lyrics")
                                     .ghost()
+                                    .compact()
                                     .label("Lyrics")
                                     .selected(self.lyrics_visible)
                                     .disabled(
@@ -21582,12 +27976,18 @@ impl MetrolistShell {
                             .child(
                                 Button::new("queue")
                                     .ghost()
-                                    .label(format!("Queue ({})", self.queue.len()))
+                                    .compact()
+                                    .icon(IconName::PanelRight)
+                                    .label(self.queue.len().to_string())
+                                    .tooltip(format!("Queue ({})", self.queue.len()))
                                     .selected(self.queue_visible)
                                     .disabled(self.queue.is_empty())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.playlist_picker_song = None;
                                         this.cloud_playlist_picker_song = None;
+                                        this.media_info_panel_visible = false;
+                                        this.media_info_task = None;
+                                        this.media_info_state = None;
                                         this.lyrics_visible = false;
                                         this.playback_parameters_visible = false;
                                         if matches!(this.lyrics_state, LyricsViewState::Loading(_))
@@ -21622,6 +28022,8 @@ impl Render for MetrolistShell {
             Some(self.render_playback_parameters_panel(cx))
         } else if self.lyrics_visible {
             Some(self.render_lyrics_panel(cx))
+        } else if self.media_info_panel_visible {
+            Some(self.render_media_info_panel(cx))
         } else if self.queue_visible {
             Some(self.render_queue_panel(cx))
         } else {
@@ -21633,16 +28035,29 @@ impl Render for MetrolistShell {
             h_flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.render_sidebar(cx))
-                .child(
-                    div()
+                .child(self.render_sidebar(window, cx))
+                .child(if self.model.route() == Route::History {
+                    v_flex()
                         .flex_1()
                         .min_w_0()
+                        .min_h_0()
+                        .h_full()
+                        .px_6()
+                        .py_5()
+                        .child(self.render_page(cx))
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
                         .h_full()
                         .overflow_y_scrollbar()
-                        .p_7()
-                        .child(self.render_page(cx)),
-                )
+                        .px_6()
+                        .py_5()
+                        .child(self.render_page(cx))
+                        .into_any_element()
+                })
                 .when_some(side_panel, |layout, panel| layout.child(panel))
                 .into_any_element()
         };
@@ -21655,6 +28070,25 @@ impl Render for MetrolistShell {
             .text_color(cx.theme().foreground)
             .child(upper_content)
             .child(self.render_player(window, cx))
+    }
+}
+
+fn search_result_count_label(count: usize, filter: SearchFilter) -> String {
+    match filter {
+        SearchFilter::All => format!("{count} results"),
+        _ => format!("{count} {}", filter.label().to_lowercase()),
+    }
+}
+
+fn shell_menu_action<F>(
+    view: Entity<MetrolistShell>,
+    handler: F,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static
+where
+    F: Fn(&mut MetrolistShell, &mut Window, &mut Context<MetrolistShell>) + Clone + 'static,
+{
+    move |_, window, cx| {
+        view.update(cx, |this, cx| handler(this, window, cx));
     }
 }
 
@@ -21690,6 +28124,26 @@ fn radio_state_seed_video_id(state: &RadioQueueState) -> Option<&str> {
 
 fn radio_state_matches_song(state: &RadioQueueState, video_id: &str) -> bool {
     radio_state_seed_video_id(state) == Some(video_id)
+}
+
+fn browse_playback_endpoint_status<'a>(
+    state: &'a RadioQueueState,
+    endpoint: &BrowsePlaybackEndpoint,
+) -> (bool, Option<&'a str>) {
+    match state {
+        RadioQueueState::Loading(RadioRequest::Endpoint {
+            endpoint: requested,
+            ..
+        }) if requested == endpoint => (true, None),
+        RadioQueueState::Failed(
+            RadioRequest::Endpoint {
+                endpoint: requested,
+                ..
+            },
+            message,
+        ) if requested == endpoint => (false, Some(message)),
+        _ => (false, None),
+    }
 }
 
 fn accept_radio_continuation(
@@ -21820,9 +28274,31 @@ fn format_download_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
+}
+
 fn collect_thumbnail_url(url: Option<&str>, urls: &mut HashSet<String>) {
     if let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) {
         urls.insert(url.to_owned());
+    }
+}
+
+fn collect_local_playlist_thumbnail_urls(playlist: &LocalPlaylist, urls: &mut HashSet<String>) {
+    if playlist.thumbnail_url.is_some() {
+        collect_thumbnail_url(playlist.thumbnail_url.as_deref(), urls);
+    } else {
+        for url in playlist.preview_thumbnail_urls.iter().take(4) {
+            collect_thumbnail_url(Some(url), urls);
+        }
     }
 }
 
@@ -22097,15 +28573,19 @@ mod tests {
     #[test]
     fn sleep_timer_supports_deadlines_and_end_of_song() {
         let now = Instant::now();
-        let deadline = SleepTimer::Deadline(now + Duration::from_secs(90));
+        let deadline = SleepTimer::Deadline {
+            deadline: now + Duration::from_secs(90),
+            stop_after_current_song: false,
+            fade_out: false,
+        };
 
         assert_eq!(deadline.summary(now), "Stops in 1:30");
         assert!(!deadline.deadline_reached(now + Duration::from_secs(89)));
         assert!(deadline.deadline_reached(now + Duration::from_secs(90)));
         assert!(!deadline.stops_after_song());
-        assert!(SleepTimer::EndOfSong.stops_after_song());
+        assert!(SleepTimer::EndOfSong { fade_out: false }.stops_after_song());
         assert_eq!(
-            SleepTimer::EndOfSong.summary(now),
+            SleepTimer::EndOfSong { fade_out: false }.summary(now),
             "Stops when this song ends"
         );
     }
