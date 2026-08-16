@@ -39,6 +39,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+use crate::config::{
+    AutomaticSleepTimerSchedule, DEFAULT_SLEEP_TIMER_MINUTES, MAX_SLEEP_TIMER_MINUTES,
+    MIN_SLEEP_TIMER_MINUTES, SLEEP_TIMER_MINUTES_PER_DAY, SleepTimerWindow,
+};
 use crate::domain::{
     BrowseItem, BrowseKind, BrowsePage, BrowsePlaybackEndpoint, ExplorePage, HomeChip, HomeItem,
     HomePage, HomeSection, LyricsDocument, PlaylistEntry, RemoteHistoryEntry, RemoteHistoryPage,
@@ -101,12 +105,23 @@ const HISTORY_SECTION_ROW_HEIGHT: Pixels = px(32.);
 const HISTORY_ENTRY_ROW_HEIGHT: Pixels = px(60.);
 const LIBRARY_ROW_HEIGHT: Pixels = px(56.);
 const QUEUE_ROW_HEIGHT: Pixels = px(56.);
-const MIN_SLEEP_TIMER_MINUTES: u16 = 5;
-const MAX_SLEEP_TIMER_MINUTES: u16 = 120;
-const DEFAULT_SLEEP_TIMER_MINUTES: u16 = 30;
 const SLEEP_TIMER_FADE_OUT_WINDOW: Duration = Duration::from_secs(60);
 const ARTWORK_SEEK_STEP: Duration = Duration::from_secs(5);
 const PROGRESSIVE_SEEK_WINDOW: Duration = Duration::from_secs(1);
+const AUTOMATIC_SLEEP_TIMER_DAY_NAMES: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+fn default_automatic_sleep_timer_window() -> SleepTimerWindow {
+    AutomaticSleepTimerSchedule::default().windows[0]
+        .expect("automatic sleep timer default must include a window")
+}
 
 fn csv_field(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
@@ -911,6 +926,7 @@ struct LocalLibraryRetryTargets {
     favorites: bool,
     podcasts: bool,
     episodes: bool,
+    local_playlist_songs: bool,
     playlists: bool,
     downloads: bool,
 }
@@ -921,6 +937,7 @@ impl LocalLibraryRetryTargets {
         favorites: &StoredViewState<Vec<FavoriteEntry>>,
         podcasts: &StoredViewState<Vec<PodcastSubscription>>,
         episodes: &StoredViewState<Vec<SavedEpisode>>,
+        local_playlist_songs: &StoredViewState<Vec<Song>>,
         playlists: &StoredViewState<Vec<LocalPlaylist>>,
         downloads: &StoredViewState<Vec<AudioDownload>>,
     ) -> Self {
@@ -929,6 +946,7 @@ impl LocalLibraryRetryTargets {
             favorites: matches!(favorites, StoredViewState::Failed(_)),
             podcasts: matches!(podcasts, StoredViewState::Failed(_)),
             episodes: matches!(episodes, StoredViewState::Failed(_)),
+            local_playlist_songs: matches!(local_playlist_songs, StoredViewState::Failed(_)),
             playlists: matches!(playlists, StoredViewState::Failed(_)),
             downloads: matches!(downloads, StoredViewState::Failed(_)),
         }
@@ -939,6 +957,7 @@ impl LocalLibraryRetryTargets {
             || self.favorites
             || self.podcasts
             || self.episodes
+            || self.local_playlist_songs
             || self.playlists
             || self.downloads
     }
@@ -1019,6 +1038,13 @@ enum SettingsOperation {
     #[default]
     Idle,
     Applying,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AutomaticSleepTimerPreset {
+    Daily,
+    Weekdays,
+    Weekends,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1568,6 +1594,7 @@ pub struct MetrolistShell {
     stats_period: StatsPeriod,
     stats_state: StoredViewState<ListeningStats>,
     stats_task: Option<Task<()>>,
+    stats_request_generation: u64,
     history_query: String,
     browse_state: Option<BrowseViewState>,
     browse_back_stack: Vec<BrowsePage>,
@@ -1616,6 +1643,8 @@ pub struct MetrolistShell {
     desktop_media: DesktopMediaSession,
     store: DesktopStore,
     queue: Queue,
+    queue_selection_mode: bool,
+    queue_selected_video_ids: HashSet<String>,
     repeat_mode: RepeatMode,
     shuffle_enabled: bool,
     shuffle_primary_len: usize,
@@ -1745,6 +1774,7 @@ pub struct MetrolistShell {
     speed_dial_notice: Option<String>,
     podcast_subscriptions: StoredViewState<Vec<PodcastSubscription>>,
     episodes_for_later: StoredViewState<Vec<SavedEpisode>>,
+    local_playlist_songs_state: StoredViewState<Vec<Song>>,
     podcast_operation: PodcastOperation,
     podcast_error: Option<String>,
     podcast_notice: Option<String>,
@@ -2174,6 +2204,7 @@ impl MetrolistShell {
                 speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
+                local_playlist_songs,
                 catalog_items,
                 playlists,
                 downloads,
@@ -2190,6 +2221,7 @@ impl MetrolistShell {
                 initial_store.speed_dial_local_playlists(),
                 initial_store.podcast_subscriptions(),
                 initial_store.episodes_for_later(),
+                initial_store.local_playlist_songs(),
                 initial_store.catalog_items(2_000),
                 initial_store.playlists_sorted(playlist_sort, playlist_sort_direction),
                 initial_store.downloads(),
@@ -2242,6 +2274,7 @@ impl MetrolistShell {
                 speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
+                local_playlist_songs,
                 catalog_items,
                 playlists,
                 downloads,
@@ -2261,6 +2294,7 @@ impl MetrolistShell {
                 speed_dial_local_playlists,
                 podcast_subscriptions,
                 episodes_for_later,
+                local_playlist_songs,
                 catalog_items,
                 playlists,
                 downloads,
@@ -2317,6 +2351,10 @@ impl MetrolistShell {
                         Err(error) => StoredViewState::Failed(error.to_string()),
                     };
                 }
+                this.local_playlist_songs_state = match local_playlist_songs {
+                    Ok(songs) => StoredViewState::Loaded(songs),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
                 match catalog_items {
                     Ok(items) => this.merge_local_catalog_items(items),
                     Err(error) if matches!(this.local_catalog_state, StoredViewState::Loading) => {
@@ -2521,6 +2559,7 @@ impl MetrolistShell {
             stats_period: StatsPeriod::Week,
             stats_state: StoredViewState::Loading,
             stats_task: None,
+            stats_request_generation: 0,
             history_query: String::new(),
             browse_state: None,
             browse_back_stack: Vec::new(),
@@ -2569,6 +2608,8 @@ impl MetrolistShell {
             desktop_media,
             store,
             queue: Queue::default(),
+            queue_selection_mode: false,
+            queue_selected_video_ids: HashSet::new(),
             repeat_mode: RepeatMode::Off,
             shuffle_enabled: false,
             shuffle_primary_len: 0,
@@ -2713,6 +2754,7 @@ impl MetrolistShell {
             speed_dial_notice: None,
             podcast_subscriptions: StoredViewState::Loading,
             episodes_for_later: StoredViewState::Loading,
+            local_playlist_songs_state: StoredViewState::Loading,
             podcast_operation: PodcastOperation::Idle,
             podcast_error: None,
             podcast_notice: None,
@@ -4206,6 +4248,7 @@ impl MetrolistShell {
         }
         self.playlist_picker_song = None;
         self.queue_visible = false;
+        self.clear_queue_selection();
         self.lyrics_visible = false;
         self.playback_parameters_visible = false;
         if matches!(self.lyrics_state, LyricsViewState::Loading(_)) {
@@ -4929,6 +4972,7 @@ impl MetrolistShell {
         self.playback_parameters_visible = !self.playback_parameters_visible;
         if self.playback_parameters_visible {
             self.queue_visible = false;
+            self.clear_queue_selection();
             self.lyrics_visible = false;
             self.playlist_picker_song = None;
             self.cloud_playlist_picker_song = None;
@@ -6058,6 +6102,7 @@ impl MetrolistShell {
         }
         self.now_playing_visible = true;
         self.queue_visible = false;
+        self.clear_queue_selection();
         self.lyrics_visible = false;
         self.playback_parameters_visible = false;
         self.playlist_picker_song = None;
@@ -6075,6 +6120,7 @@ impl MetrolistShell {
 
     fn close_now_playing(&mut self, cx: &mut Context<Self>) {
         self.now_playing_visible = false;
+        self.clear_queue_selection();
         if matches!(self.lyrics_state, LyricsViewState::Loading(_)) {
             self.lyrics_task = None;
             self.lyrics_state = LyricsViewState::Idle;
@@ -6188,6 +6234,7 @@ impl MetrolistShell {
     fn open_media_info_panel(&mut self, song: Song, cx: &mut Context<Self>) {
         self.now_playing_visible = false;
         self.queue_visible = false;
+        self.clear_queue_selection();
         self.lyrics_visible = false;
         self.playback_parameters_visible = false;
         self.playlist_picker_song = None;
@@ -6238,6 +6285,7 @@ impl MetrolistShell {
         self.lyrics_visible = !self.lyrics_visible;
         if self.lyrics_visible {
             self.queue_visible = false;
+            self.clear_queue_selection();
             self.playback_parameters_visible = false;
             self.playlist_picker_song = None;
             self.cloud_playlist_picker_song = None;
@@ -6248,6 +6296,7 @@ impl MetrolistShell {
             }
             self.update_lyrics_timeline();
         } else {
+            self.clear_queue_selection();
             if matches!(self.lyrics_state, LyricsViewState::Loading(_)) {
                 self.lyrics_state = LyricsViewState::Idle;
             }
@@ -6344,12 +6393,21 @@ impl MetrolistShell {
         if self.stats_task.is_some() {
             return;
         }
+        self.start_stats_request(cx);
+    }
+
+    fn start_stats_request(&mut self, cx: &mut Context<Self>) {
+        self.stats_request_generation = self.stats_request_generation.wrapping_add(1);
+        let generation = self.stats_request_generation;
         self.stats_state = StoredViewState::Loading;
         let store = self.store.clone();
         let start_ms = self.stats_period.start_ms();
         self.stats_task = Some(cx.spawn(async move |this, cx| {
             let result = store.listening_stats(start_ms, 20).await;
             this.update(cx, |this, cx| {
+                if this.stats_request_generation != generation {
+                    return;
+                }
                 this.stats_task = None;
                 this.stats_state = match result {
                     Ok(stats) => StoredViewState::Loaded(stats),
@@ -6368,7 +6426,7 @@ impl MetrolistShell {
             return;
         }
         self.stats_period = period;
-        self.reload_stats(cx);
+        self.start_stats_request(cx);
     }
 
     fn merge_local_catalog_items(&mut self, items: Vec<BrowseItem>) {
@@ -6621,9 +6679,12 @@ impl MetrolistShell {
                 this.search_state = match result {
                     Ok(result) => {
                         this.remember_local_catalog_items(result.items.clone(), cx);
-                        if (filter.returns_songs() && result.songs.is_empty())
-                            || (!filter.returns_songs() && result.items.is_empty())
-                        {
+                        let empty = match filter {
+                            SearchFilter::All => result.songs.is_empty() && result.items.is_empty(),
+                            filter if filter.returns_songs() => result.songs.is_empty(),
+                            _ => result.items.is_empty(),
+                        };
+                        if empty {
                             SearchViewState::Empty
                         } else {
                             SearchViewState::Loaded(result)
@@ -6973,10 +7034,15 @@ impl MetrolistShell {
                         {
                             next.continuation = None;
                         }
-                        if let SearchViewState::Loaded(current) = &mut this.search_state
-                            && current.append_continuation(next) == 0
-                        {
-                            current.continuation = None;
+                        if let SearchViewState::Loaded(current) = &mut this.search_state {
+                            let previous_song_count = current.songs.len();
+                            let previous_item_count = current.items.len();
+                            current.append_continuation(next);
+                            if current.songs.len() == previous_song_count
+                                && current.items.len() == previous_item_count
+                            {
+                                current.continuation = None;
+                            }
                         }
                     }
                     Err(error) => this.search_load_more_error = Some(error.to_string()),
@@ -8153,6 +8219,7 @@ impl MetrolistShell {
             &self.favorites_state,
             &self.podcast_subscriptions,
             &self.episodes_for_later,
+            &self.local_playlist_songs_state,
             &self.playlists_state,
             &self.downloads_state,
         )
@@ -8178,6 +8245,9 @@ impl MetrolistShell {
         }
         if targets.episodes {
             self.episodes_for_later = StoredViewState::Loading;
+        }
+        if targets.local_playlist_songs {
+            self.local_playlist_songs_state = StoredViewState::Loading;
         }
         if targets.playlists {
             self.playlists_state = StoredViewState::Loading;
@@ -8223,6 +8293,13 @@ impl MetrolistShell {
                     }
                 },
                 async {
+                    if targets.local_playlist_songs {
+                        Some(store.local_playlist_songs().await)
+                    } else {
+                        None
+                    }
+                },
+                async {
                     if targets.playlists {
                         Some(store.playlists_sorted(sort, direction).await)
                     } else {
@@ -8239,7 +8316,15 @@ impl MetrolistShell {
             )
         });
         cx.spawn(async move |this, cx| {
-            let (history, favorites, podcasts, episodes, playlists, downloads) = operation.await;
+            let (
+                history,
+                favorites,
+                podcasts,
+                episodes,
+                local_playlist_songs,
+                playlists,
+                downloads,
+            ) = operation.await;
             this.update(cx, |this, cx| {
                 let mut errors = Vec::new();
                 if let Some(result) = history {
@@ -8285,6 +8370,18 @@ impl MetrolistShell {
                             let message = error.to_string();
                             errors.push(format!("episodes: {message}"));
                             this.episodes_for_later = StoredViewState::Failed(message);
+                        }
+                    }
+                }
+                if let Some(result) = local_playlist_songs {
+                    match result {
+                        Ok(songs) => {
+                            this.local_playlist_songs_state = StoredViewState::Loaded(songs)
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            errors.push(format!("Playlist songs: {message}"));
+                            this.local_playlist_songs_state = StoredViewState::Failed(message);
                         }
                     }
                 }
@@ -8480,6 +8577,7 @@ impl MetrolistShell {
             self.library_error = Some("Create a playlist before adding songs.".into());
         } else {
             self.queue_visible = false;
+            self.clear_queue_selection();
             self.lyrics_visible = false;
             self.playback_parameters_visible = false;
             self.cloud_playlist_picker_song = None;
@@ -8490,6 +8588,24 @@ impl MetrolistShell {
             self.playlist_picker_song = Some(songs);
         }
         cx.notify();
+    }
+
+    fn reload_local_playlist_songs(&mut self, cx: &mut Context<Self>) {
+        self.local_playlist_songs_state = StoredViewState::Loading;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let result = store.local_playlist_songs().await;
+            this.update(cx, |this, cx| {
+                this.local_playlist_songs_state = match result {
+                    Ok(songs) => StoredViewState::Loaded(songs),
+                    Err(error) => StoredViewState::Failed(error.to_string()),
+                };
+                this.refresh_visible_thumbnails(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn replace_local_playlist_list(&mut self, playlists: Vec<LocalPlaylist>) {
@@ -8523,6 +8639,7 @@ impl MetrolistShell {
         let direction = self.playlist_sort_direction;
         cx.spawn(async move |this, cx| {
             let result = store.add_many_to_playlist(playlist_id, songs).await;
+            let mutation_succeeded = result.is_ok();
             let playlists = match result {
                 Ok(()) => store.playlists_sorted(sort, direction).await,
                 Err(error) => Err(error),
@@ -8535,6 +8652,9 @@ impl MetrolistShell {
                         this.refresh_visible_thumbnails(cx);
                     }
                     Err(error) => this.library_error = Some(error.to_string()),
+                }
+                if mutation_succeeded {
+                    this.reload_local_playlist_songs(cx);
                 }
                 cx.notify();
             })
@@ -8594,6 +8714,7 @@ impl MetrolistShell {
                     this.replace_local_playlist_list(playlists);
                     this.refresh_visible_thumbnails(cx);
                 }
+                this.reload_local_playlist_songs(cx);
                 cx.notify();
             })
             .ok();
@@ -8656,6 +8777,7 @@ impl MetrolistShell {
                     this.replace_local_playlist_list(playlists);
                     this.refresh_visible_thumbnails(cx);
                 }
+                this.reload_local_playlist_songs(cx);
                 cx.notify();
             })
             .ok();
@@ -9079,6 +9201,7 @@ impl MetrolistShell {
         let direction = self.playlist_sort_direction;
         cx.spawn(async move |this, cx| {
             let result = store.delete_playlist(playlist_id).await;
+            let mutation_succeeded = result.is_ok();
             let playlists = match result {
                 Ok(()) => store.playlists_sorted(sort, direction).await,
                 Err(error) => Err(error),
@@ -9099,6 +9222,9 @@ impl MetrolistShell {
                         }
                     }
                     Err(error) => this.library_error = Some(error.to_string()),
+                }
+                if mutation_succeeded {
+                    this.reload_local_playlist_songs(cx);
                 }
                 cx.notify();
             })
@@ -9253,6 +9379,7 @@ impl MetrolistShell {
         }
         self.audio_player.set_volume(volume);
         if !self.settings.persistent_queue {
+            self.clear_queue_selection();
             self.queue.replace(Vec::new(), None);
             self.shuffle_primary_len = 0;
             self.current_song = None;
@@ -9261,6 +9388,7 @@ impl MetrolistShell {
             return;
         }
         let items = queue.into_iter().map(|song| QueueItem { song }).collect();
+        self.clear_queue_selection();
         let current = self
             .queue
             .replace(items, current_index)
@@ -9452,6 +9580,7 @@ impl MetrolistShell {
         if song.is_episode {
             return;
         }
+        self.clear_queue_selection();
         let seed_video_id = song.video_id.clone();
         if self
             .current_song
@@ -9631,6 +9760,7 @@ impl MetrolistShell {
                 let continuation =
                     accept_radio_continuation(&mut seen_continuations, None, page.continuation);
                 if replace_future && !songs.is_empty() {
+                    self.clear_queue_selection();
                     self.queue.truncate_after_current();
                     self.shuffle_primary_len = self.queue.len();
                 }
@@ -9744,6 +9874,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.clear_queue_selection();
         self.reset_radio_queue();
         self.auto_radio_refill_allowed = allow_radio_refill;
         let keep_shuffle = self.settings.persistent_shuffle_across_queues && self.shuffle_enabled;
@@ -9798,6 +9929,209 @@ impl MetrolistShell {
         let song = self.queue.select(index).map(|item| item.song.clone());
         if let Some(song) = song {
             self.start_playback(song, window, cx);
+        }
+    }
+
+    fn clear_queue_selection(&mut self) {
+        self.queue_selection_mode = false;
+        self.queue_selected_video_ids.clear();
+    }
+
+    fn queue_selection_all_ids(&self) -> HashSet<String> {
+        self.queue
+            .items()
+            .iter()
+            .map(|item| item.song.video_id.clone())
+            .collect()
+    }
+
+    fn queue_selection_is_all_selected(&self) -> bool {
+        let all_ids = self.queue_selection_all_ids();
+        !all_ids.is_empty() && all_ids == self.queue_selected_video_ids
+    }
+
+    fn queue_selection_songs(&self) -> Vec<Song> {
+        self.queue
+            .items()
+            .iter()
+            .filter(|item| self.queue_selected_video_ids.contains(&item.song.video_id))
+            .map(|item| item.song.clone())
+            .collect()
+    }
+
+    fn toggle_queue_selection_mode(&mut self, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+        if self.queue_selection_mode {
+            self.clear_queue_selection();
+        } else {
+            self.queue_selection_mode = true;
+            self.queue_selected_video_ids.clear();
+        }
+        cx.notify();
+    }
+
+    fn toggle_queue_selection(&mut self, video_id: String, cx: &mut Context<Self>) {
+        if !self.queue_selection_mode || self.listen_together_is_guest() {
+            return;
+        }
+        if !self.queue_selected_video_ids.remove(&video_id) {
+            self.queue_selected_video_ids.insert(video_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_all_queue_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.queue_selection_mode || self.listen_together_is_guest() {
+            return;
+        }
+        if self.queue_selection_is_all_selected() {
+            self.queue_selected_video_ids.clear();
+        } else {
+            self.queue_selected_video_ids = self.queue_selection_all_ids();
+        }
+        cx.notify();
+    }
+
+    fn exit_queue_selection(&mut self, cx: &mut Context<Self>) {
+        self.clear_queue_selection();
+        cx.notify();
+    }
+
+    fn play_selected_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        let songs = self.queue_selection_songs();
+        if songs.is_empty() {
+            return;
+        }
+        self.clear_queue_selection();
+        self.play_song_collection(songs, 0, window, cx);
+    }
+
+    fn shuffle_selected_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        let songs = self.queue_selection_songs();
+        if songs.is_empty() {
+            return;
+        }
+        self.clear_queue_selection();
+        self.play_shuffled_collection(songs, window, cx);
+    }
+
+    fn add_selected_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        let songs = self.queue_selection_songs();
+        if songs.is_empty() {
+            return;
+        }
+        self.clear_queue_selection();
+        self.add_collection_to_queue(songs, window, cx);
+    }
+
+    fn add_selected_queue_to_local_playlist(&mut self, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+        let songs = self.queue_selection_songs();
+        if songs.is_empty() {
+            return;
+        }
+        self.clear_queue_selection();
+        self.open_playlist_picker_songs(songs, cx);
+    }
+
+    fn download_selected_queue(&mut self, cx: &mut Context<Self>) {
+        if self.listen_together_is_guest() {
+            return;
+        }
+        let songs = self.queue_selection_songs();
+        if songs.is_empty() {
+            return;
+        }
+        self.clear_queue_selection();
+        for song in songs {
+            self.queue_song_download(song, cx);
+        }
+        cx.notify();
+    }
+
+    fn stop_after_queue_empty(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.audio_player.snapshot();
+        self.save_current_episode_progress(snapshot.position, cx);
+        self.playback_task = None;
+        self.pending_crossfade_duration = None;
+        self.episode_resume_generation = self.episode_resume_generation.wrapping_add(1);
+        self.resolving_playback = false;
+        self.playback_source_attempt = PlaybackSourceAttempt::None;
+        self.pending_resume_position = None;
+        self.play_after_resolution = None;
+        self.persisted_playback_source = None;
+        self.active_playback_source = None;
+        self.current_song = None;
+        self.now_playing_visible = false;
+        self.played_this_track = Duration::ZERO;
+        self.history_recorded_for_current = false;
+        self.lastfm_playback_tracker.reset();
+        self.lyrics_task = None;
+        self.lyrics_state = LyricsViewState::Idle;
+        self.lyrics_active_line = None;
+        self.last_playback_state = PlaybackState::Idle;
+        self.playback_error = self
+            .audio_player
+            .stop()
+            .err()
+            .map(|error| error.to_string());
+        self.save_session(cx);
+        self.refresh_visible_thumbnails(cx);
+        cx.notify();
+    }
+
+    fn remove_selected_queue_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reject_guest_playback_control(cx) {
+            return;
+        }
+        let selected = self.queue_selected_video_ids.clone();
+        if selected.is_empty() {
+            return;
+        }
+        let indices = self
+            .queue
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| selected.contains(&item.song.video_id).then_some(index))
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            self.clear_queue_selection();
+            cx.notify();
+            return;
+        }
+
+        let mut removed_current = false;
+        for index in indices.into_iter().rev() {
+            removed_current |= self.queue.current_index() == Some(index);
+            self.queue.remove(index);
+        }
+        self.clear_queue_selection();
+        if !removed_current {
+            self.save_session(cx);
+            self.refresh_visible_thumbnails(cx);
+            cx.notify();
+            return;
+        }
+
+        self.reset_radio_queue();
+        if let Some(song) = self.queue.current().map(|item| item.song.clone()) {
+            self.start_playback(song, window, cx);
+        } else {
+            self.stop_after_queue_empty(cx);
         }
     }
 
@@ -9983,6 +10317,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) {
             return;
         }
+        self.clear_queue_selection();
         let removed_current = self.queue.current_index() == Some(index);
         if self.queue.remove(index).is_none() {
             return;
@@ -10000,35 +10335,7 @@ impl MetrolistShell {
             self.start_playback(song, window, cx);
             return;
         }
-
-        let snapshot = self.audio_player.snapshot();
-        self.save_current_episode_progress(snapshot.position, cx);
-        self.playback_task = None;
-        self.pending_crossfade_duration = None;
-        self.episode_resume_generation = self.episode_resume_generation.wrapping_add(1);
-        self.resolving_playback = false;
-        self.playback_source_attempt = PlaybackSourceAttempt::None;
-        self.pending_resume_position = None;
-        self.play_after_resolution = None;
-        self.persisted_playback_source = None;
-        self.active_playback_source = None;
-        self.current_song = None;
-        self.now_playing_visible = false;
-        self.played_this_track = Duration::ZERO;
-        self.history_recorded_for_current = false;
-        self.lastfm_playback_tracker.reset();
-        self.lyrics_task = None;
-        self.lyrics_state = LyricsViewState::Idle;
-        self.lyrics_active_line = None;
-        self.last_playback_state = PlaybackState::Idle;
-        self.playback_error = self
-            .audio_player
-            .stop()
-            .err()
-            .map(|error| error.to_string());
-        self.save_session(cx);
-        self.refresh_visible_thumbnails(cx);
-        cx.notify();
+        self.stop_after_queue_empty(cx);
     }
 
     fn play_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -10204,6 +10511,7 @@ impl MetrolistShell {
         if self.reject_guest_playback_control(cx) || self.queue.remaining_after_current() == 0 {
             return;
         }
+        self.clear_queue_selection();
         self.queue.truncate_after_current();
         self.shuffle_primary_len = self.queue.len();
         self.reset_radio_queue();
@@ -10773,6 +11081,7 @@ impl MetrolistShell {
             .map(|song| QueueItem { song })
             .collect();
         let current_index = current.map(|_| 0);
+        self.clear_queue_selection();
         let song = self
             .queue
             .replace(items, current_index)
@@ -11387,6 +11696,18 @@ impl MetrolistShell {
         } else {
             snapshot.state
         };
+        let just_started_playing = observed_state == PlaybackState::Playing
+            && self.last_playback_state != PlaybackState::Playing;
+        if just_started_playing
+            && self.sleep_timer.is_none()
+            && !self.listen_together_is_guest()
+            && self.settings.automatic_sleep_timer.matches_local_time()
+        {
+            self.start_sleep_timer_minutes(
+                u64::from(self.settings.automatic_sleep_timer.duration_minutes),
+                cx,
+            );
+        }
 
         if !self.seeking {
             let position = self.pending_resume_position.unwrap_or(snapshot.position);
@@ -13586,7 +13907,10 @@ impl MetrolistShell {
                         .on_click(cx.listener(|this, _, window, cx| this.run_search(window, cx))),
                 )
                 .into_any_element(),
-            SearchViewState::Loaded(result) if self.search_filter.returns_songs() => {
+            SearchViewState::Loaded(result)
+                if self.search_filter != SearchFilter::All
+                    && self.search_filter.returns_songs() =>
+            {
                 let pagination = self.render_search_pagination(result.continuation.is_some(), cx);
                 v_flex()
                     .gap_2()
@@ -13606,6 +13930,37 @@ impl MetrolistShell {
                             .iter()
                             .enumerate()
                             .map(|(index, song)| self.render_song_row(index, song, cx)),
+                    )
+                    .when_some(pagination, |layout, pagination| layout.child(pagination))
+                    .into_any_element()
+            }
+            SearchViewState::Loaded(result) if self.search_filter == SearchFilter::All => {
+                let pagination = self.render_search_pagination(result.continuation.is_some(), cx);
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .mb_2()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(search_result_count_label(
+                                result.songs.len() + result.items.len(),
+                                self.search_filter,
+                            )),
+                    )
+                    .children(
+                        result
+                            .songs
+                            .iter()
+                            .enumerate()
+                            .map(|(index, song)| self.render_song_row(index, song, cx)),
+                    )
+                    .children(
+                        result
+                            .items
+                            .iter()
+                            .enumerate()
+                            .map(|(index, item)| self.render_browse_item_row(index, item, cx)),
                     )
                     .when_some(pagination, |layout, pagination| layout.child(pagination))
                     .into_any_element()
@@ -15782,7 +16137,54 @@ impl MetrolistShell {
                 add_song(&episode.song);
             }
         }
+        if let StoredViewState::Loaded(songs) = &self.local_playlist_songs_state {
+            for song in songs {
+                add_song(song);
+            }
+        }
         songs
+    }
+
+    fn local_song_catalog_items(&self) -> Vec<BrowseItem> {
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        for song in self.local_known_songs() {
+            if let Some(album) = song.album.as_ref()
+                && !album.browse_id.trim().is_empty()
+                && !album.title.trim().is_empty()
+                && seen.insert((BrowseKind::Album, album.browse_id.clone()))
+            {
+                items.push(BrowseItem {
+                    browse_id: album.browse_id.clone(),
+                    kind: BrowseKind::Album,
+                    title: album.title.clone(),
+                    subtitle: "Album · On this device".into(),
+                    thumbnail_url: album
+                        .thumbnail_url
+                        .clone()
+                        .or_else(|| song.thumbnail_url.clone()),
+                    params: None,
+                    editable: false,
+                });
+            }
+            for artist in &song.artists {
+                let Some(id) = artist.id.as_ref().filter(|id| !id.trim().is_empty()) else {
+                    continue;
+                };
+                if seen.insert((BrowseKind::Artist, id.clone())) {
+                    items.push(BrowseItem {
+                        browse_id: id.clone(),
+                        kind: BrowseKind::Artist,
+                        title: artist.name.clone(),
+                        subtitle: "Artist · On this device".into(),
+                        thumbnail_url: song.thumbnail_url.clone(),
+                        params: None,
+                        editable: false,
+                    });
+                }
+            }
+        }
+        items
     }
 
     fn local_search_songs(&self) -> Vec<Song> {
@@ -15819,27 +16221,18 @@ impl MetrolistShell {
                 .collect::<Vec<_>>(),
             StoredViewState::Loading | StoredViewState::Failed(_) => Vec::new(),
         };
-        if kind == BrowseKind::Artist {
+        if matches!(kind, BrowseKind::Album | BrowseKind::Artist) {
             let mut seen = items
                 .iter()
                 .map(|item| item.browse_id.clone())
                 .collect::<HashSet<_>>();
-            for song in self.local_known_songs() {
-                for artist in &song.artists {
-                    let Some(id) = artist.id.as_ref().filter(|id| !id.trim().is_empty()) else {
-                        continue;
-                    };
-                    if artist.name.to_lowercase().contains(&query) && seen.insert(id.clone()) {
-                        items.push(BrowseItem {
-                            browse_id: id.clone(),
-                            kind: BrowseKind::Artist,
-                            title: artist.name.clone(),
-                            subtitle: "Artist · On this device".into(),
-                            thumbnail_url: song.thumbnail_url.clone(),
-                            params: None,
-                            editable: false,
-                        });
-                    }
+            for item in self.local_song_catalog_items() {
+                if item.kind == kind
+                    && (item.title.to_lowercase().contains(&query)
+                        || item.subtitle.to_lowercase().contains(&query))
+                    && seen.insert(item.browse_id.clone())
+                {
+                    items.push(item);
                 }
             }
         }
@@ -15933,7 +16326,8 @@ impl MetrolistShell {
         let songs_loading = matches!(self.history_state, HistoryViewState::Loading)
             || matches!(self.favorites_state, StoredViewState::Loading)
             || matches!(self.downloads_state, StoredViewState::Loading)
-            || matches!(self.episodes_for_later, StoredViewState::Loading);
+            || matches!(self.episodes_for_later, StoredViewState::Loading)
+            || matches!(self.local_playlist_songs_state, StoredViewState::Loading);
         let loading = ((show_songs || show_artists) && songs_loading)
             || ((show_albums || show_artists)
                 && matches!(self.local_catalog_state, StoredViewState::Loading))
@@ -15950,6 +16344,9 @@ impl MetrolistShell {
         }
         if let StoredViewState::Failed(message) = &self.episodes_for_later {
             errors.push(format!("Episodes for Later: {message}"));
+        }
+        if let StoredViewState::Failed(message) = &self.local_playlist_songs_state {
+            errors.push(format!("Playlist songs: {message}"));
         }
         if let StoredViewState::Failed(message) = &self.playlists_state {
             errors.push(format!("Playlists: {message}"));
@@ -16920,6 +17317,9 @@ impl MetrolistShell {
                 add_browse(item);
             }
         }
+        for item in self.local_song_catalog_items() {
+            add_browse(&item);
+        }
 
         if let StoredViewState::Loaded(playlists) = &self.playlists_state {
             for playlist in playlists {
@@ -17074,6 +17474,7 @@ impl MetrolistShell {
         );
         let loading = matches!(self.cloud_library_state, CloudLibraryViewState::Loading)
             || matches!(self.local_catalog_state, StoredViewState::Loading)
+            || matches!(self.local_playlist_songs_state, StoredViewState::Loading)
             || matches!(self.playlists_state, StoredViewState::Loading);
         let cloud_refreshing = matches!(self.cloud_library_state, CloudLibraryViewState::Loading);
         let direction_icon = match self.library_mix_sort_direction {
@@ -17090,6 +17491,9 @@ impl MetrolistShell {
         }
         if let Some(error) = &self.local_catalog_error {
             errors.push(format!("Local albums and artists unavailable: {error}"));
+        }
+        if let StoredViewState::Failed(error) = &self.local_playlist_songs_state {
+            errors.push(format!("Local playlist songs unavailable: {error}"));
         }
         if let StoredViewState::Failed(error) = &self.playlists_state {
             errors.push(format!("Local playlists unavailable: {error}"));
@@ -17630,6 +18034,12 @@ impl MetrolistShell {
             HistoryEntryAction::RemoveRemote { .. }
                 if self.remote_history_operation == RemoteHistoryOperation::Removing
         );
+        let remote_delete_eligible = match &action {
+            HistoryEntryAction::RemoveRemote { feedback_token } => feedback_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty()),
+            HistoryEntryAction::RemoveLocal { .. } => false,
+        };
         let more = Button::new(format!("{id}-more"))
             .ghost()
             .compact()
@@ -17640,53 +18050,58 @@ impl MetrolistShell {
                 let view = view.clone();
                 let action = action.clone();
                 move |menu, _, _| {
-                    menu.item(PopupMenuItem::new("Play next").on_click({
-                        let view = view.clone();
-                        let song = song.clone();
-                        shell_menu_action(view, move |this, window, cx| {
-                            this.play_song_next(song.clone(), window, cx);
-                        })
-                    }))
-                    .item(PopupMenuItem::new("Add to queue").on_click({
-                        let view = view.clone();
-                        let song = song.clone();
-                        shell_menu_action(view, move |this, window, cx| {
-                            this.add_song_to_queue(song.clone(), window, cx);
-                        })
-                    }))
-                    .item(PopupMenuItem::new("Download").on_click({
-                        let view = view.clone();
-                        let song = song.clone();
-                        shell_menu_action(view, move |this, _, cx| {
-                            this.queue_song_download(song.clone(), cx);
-                        })
-                    }))
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(match &action {
-                            HistoryEntryAction::RemoveLocal { .. } => "Remove",
-                            HistoryEntryAction::RemoveRemote { .. } if removing => "Removing…",
-                            HistoryEntryAction::RemoveRemote { .. } => "Remove remote",
-                        })
-                        .disabled(match &action {
-                            HistoryEntryAction::RemoveLocal { .. } => library_busy,
-                            HistoryEntryAction::RemoveRemote { .. } => removing,
-                        })
-                        .on_click({
+                    let mut menu = menu
+                        .item(PopupMenuItem::new("Play next").on_click({
                             let view = view.clone();
-                            let action = action.clone();
-                            shell_menu_action(view, move |this, _, cx| match &action {
-                                HistoryEntryAction::RemoveLocal { entry_id } => {
-                                    this.remove_local_history_entry(*entry_id, cx);
-                                }
-                                HistoryEntryAction::RemoveRemote { feedback_token } => {
-                                    if let Some(token) = feedback_token {
-                                        this.remove_remote_history_item(token.clone(), cx);
-                                    }
-                                }
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, window, cx| {
+                                this.play_song_next(song.clone(), window, cx);
                             })
-                        }),
-                    )
+                        }))
+                        .item(PopupMenuItem::new("Add to queue").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, window, cx| {
+                                this.add_song_to_queue(song.clone(), window, cx);
+                            })
+                        }))
+                        .item(PopupMenuItem::new("Download").on_click({
+                            let view = view.clone();
+                            let song = song.clone();
+                            shell_menu_action(view, move |this, _, cx| {
+                                this.queue_song_download(song.clone(), cx);
+                            })
+                        }));
+                    if !matches!(&action, HistoryEntryAction::RemoveRemote { .. })
+                        || remote_delete_eligible
+                    {
+                        menu = menu.separator().item(
+                            PopupMenuItem::new(match &action {
+                                HistoryEntryAction::RemoveLocal { .. } => "Remove",
+                                HistoryEntryAction::RemoveRemote { .. } if removing => "Removing…",
+                                HistoryEntryAction::RemoveRemote { .. } => "Remove remote",
+                            })
+                            .disabled(match &action {
+                                HistoryEntryAction::RemoveLocal { .. } => library_busy,
+                                HistoryEntryAction::RemoveRemote { .. } => removing,
+                            })
+                            .on_click({
+                                let view = view.clone();
+                                let action = action.clone();
+                                shell_menu_action(view, move |this, _, cx| match &action {
+                                    HistoryEntryAction::RemoveLocal { entry_id } => {
+                                        this.remove_local_history_entry(*entry_id, cx);
+                                    }
+                                    HistoryEntryAction::RemoveRemote { feedback_token } => {
+                                        if let Some(token) = feedback_token {
+                                            this.remove_remote_history_item(token.clone(), cx);
+                                        }
+                                    }
+                                })
+                            }),
+                        );
+                    }
+                    menu
                 }
             });
 
@@ -20447,28 +20862,18 @@ impl MetrolistShell {
             _ => Vec::new(),
         };
 
-        if kind == BrowseKind::Artist && self.library_artist_source == LibraryArtistSource::Library
-        {
+        let derives_local_song_catalog = (kind == BrowseKind::Album
+            && self.library_album_source == LibraryAlbumSource::Library)
+            || (kind == BrowseKind::Artist
+                && self.library_artist_source == LibraryArtistSource::Library);
+        if derives_local_song_catalog {
             let mut seen = items
                 .iter()
                 .map(|item| item.browse_id.clone())
                 .collect::<HashSet<_>>();
-            for song in self.local_known_songs() {
-                for artist in &song.artists {
-                    let Some(id) = artist.id.as_ref().filter(|id| !id.trim().is_empty()) else {
-                        continue;
-                    };
-                    if seen.insert(id.clone()) {
-                        items.push(BrowseItem {
-                            browse_id: id.clone(),
-                            kind: BrowseKind::Artist,
-                            title: artist.name.clone(),
-                            subtitle: "Artist · On this device".into(),
-                            thumbnail_url: song.thumbnail_url.clone(),
-                            params: None,
-                            editable: false,
-                        });
-                    }
+            for item in self.local_song_catalog_items() {
+                if item.kind == kind && seen.insert(item.browse_id.clone()) {
+                    items.push(item);
                 }
             }
         }
@@ -20522,6 +20927,7 @@ impl MetrolistShell {
             matches!(self.cloud_library_state, CloudLibraryViewState::Loading)
         } else {
             matches!(self.local_catalog_state, StoredViewState::Loading)
+                || matches!(self.local_playlist_songs_state, StoredViewState::Loading)
         };
         let error = if cloud_source {
             if let CloudLibraryViewState::Failed(error) = &self.cloud_library_state {
@@ -20530,12 +20936,19 @@ impl MetrolistShell {
                 None
             }
         } else {
-            match &self.local_catalog_state {
+            let catalog_error = match &self.local_catalog_state {
                 StoredViewState::Failed(error) => Some(error.clone()),
                 StoredViewState::Loading | StoredViewState::Loaded(_) => {
                     self.local_catalog_error.clone()
                 }
-            }
+            };
+            catalog_error.or_else(|| {
+                if let StoredViewState::Failed(error) = &self.local_playlist_songs_state {
+                    Some(error.clone())
+                } else {
+                    None
+                }
+            })
         };
         let has_error = error.is_some();
         let signed_out =
@@ -23372,7 +23785,144 @@ impl MetrolistShell {
             .into_any_element()
     }
 
+    fn set_automatic_sleep_timer_preset(
+        &mut self,
+        preset: AutomaticSleepTimerPreset,
+        cx: &mut Context<Self>,
+    ) {
+        let default_window = default_automatic_sleep_timer_window();
+        let mut windows = [None; 7];
+        match preset {
+            AutomaticSleepTimerPreset::Daily => {
+                windows = [Some(default_window); 7];
+            }
+            AutomaticSleepTimerPreset::Weekdays => {
+                for window in &mut windows[..5] {
+                    *window = Some(default_window);
+                }
+            }
+            AutomaticSleepTimerPreset::Weekends => {
+                for window in &mut windows[5..] {
+                    *window = Some(default_window);
+                }
+            }
+        }
+        self.settings_draft.automatic_sleep_timer.windows = windows;
+        self.settings_error = None;
+        self.settings_notice = None;
+        cx.notify();
+    }
+
+    fn toggle_automatic_sleep_timer_day(&mut self, day: usize, cx: &mut Context<Self>) {
+        if day >= self.settings_draft.automatic_sleep_timer.windows.len() {
+            return;
+        }
+        let default_window = default_automatic_sleep_timer_window();
+        let window = &mut self.settings_draft.automatic_sleep_timer.windows[day];
+        if window.is_some() {
+            *window = None;
+        } else {
+            *window = Some(default_window);
+        }
+        self.settings_error = None;
+        self.settings_notice = None;
+        cx.notify();
+    }
+
+    fn adjust_automatic_sleep_timer_window(
+        &mut self,
+        day: usize,
+        start: bool,
+        delta_minutes: i16,
+        cx: &mut Context<Self>,
+    ) {
+        if day >= self.settings_draft.automatic_sleep_timer.windows.len() {
+            return;
+        }
+        if let Some(window) = &mut self.settings_draft.automatic_sleep_timer.windows[day] {
+            let adjust = |minute: u16| {
+                (i32::from(minute) + i32::from(delta_minutes))
+                    .rem_euclid(i32::from(SLEEP_TIMER_MINUTES_PER_DAY)) as u16
+            };
+            if start {
+                window.start_minute = adjust(window.start_minute);
+            } else {
+                window.end_minute = adjust(window.end_minute);
+            }
+            self.settings_error = None;
+            self.settings_notice = None;
+            cx.notify();
+        }
+    }
+
     fn render_sleep_timer_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let automatic_schedule = self.settings_draft.automatic_sleep_timer.clone();
+        let default_window = default_automatic_sleep_timer_window();
+        let automatic_day_rows =
+            AUTOMATIC_SLEEP_TIMER_DAY_NAMES
+                .iter()
+                .enumerate()
+                .map(|(day, name)| {
+                    let window = automatic_schedule.windows[day].unwrap_or(default_window);
+                    let day_enabled = automatic_schedule.windows[day].is_some();
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .flex_wrap()
+                        .child(
+                            Button::new(format!("automatic-sleep-day-{day}"))
+                                .label(*name)
+                                .selected(day_enabled)
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_automatic_sleep_timer_day(day, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("automatic-sleep-start-minus-{day}"))
+                                .label("start − 30 min")
+                                .disabled(busy || !day_enabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.adjust_automatic_sleep_timer_window(day, true, -30, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .w(px(42.))
+                                .text_center()
+                                .child(format_clock_minute(window.start_minute)),
+                        )
+                        .child(
+                            Button::new(format!("automatic-sleep-start-plus-{day}"))
+                                .label("start + 30 min")
+                                .disabled(busy || !day_enabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.adjust_automatic_sleep_timer_window(day, true, 30, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("automatic-sleep-end-minus-{day}"))
+                                .label("end − 30 min")
+                                .disabled(busy || !day_enabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.adjust_automatic_sleep_timer_window(day, false, -30, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .w(px(42.))
+                                .text_center()
+                                .child(format_clock_minute(window.end_minute)),
+                        )
+                        .child(
+                            Button::new(format!("automatic-sleep-end-plus-{day}"))
+                                .label("end + 30 min")
+                                .disabled(busy || !day_enabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.adjust_automatic_sleep_timer_window(day, false, 30, cx);
+                                })),
+                        )
+                });
         v_flex()
             .gap_4()
             .max_w(px(680.))
@@ -23468,6 +24018,141 @@ impl MetrolistShell {
                                 cx.notify();
                             })),
                     ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(div().font_semibold().child("Automatic sleep timer"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Start the configured sleep timer when playback begins during a local schedule window. Windows may cross midnight; changes take effect after Save and apply."),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("automatic-sleep-disabled")
+                                    .label("Off")
+                                    .selected(!automatic_schedule.enabled)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.automatic_sleep_timer.enabled = false;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("automatic-sleep-enabled")
+                                    .label("On")
+                                    .selected(automatic_schedule.enabled)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.automatic_sleep_timer.enabled = true;
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_sm().child("Duration"))
+                            .child(
+                                Button::new("automatic-sleep-duration-minus")
+                                    .label("− 5 min")
+                                    .disabled(
+                                        busy
+                                            || automatic_schedule.duration_minutes
+                                                <= MIN_SLEEP_TIMER_MINUTES,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.automatic_sleep_timer.duration_minutes =
+                                            this.settings_draft
+                                                .automatic_sleep_timer
+                                                .duration_minutes
+                                                .saturating_sub(5)
+                                                .max(MIN_SLEEP_TIMER_MINUTES);
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(84.))
+                                    .text_center()
+                                    .child(format!(
+                                        "{} minutes",
+                                        automatic_schedule.duration_minutes
+                                    )),
+                            )
+                            .child(
+                                Button::new("automatic-sleep-duration-plus")
+                                    .label("+ 5 min")
+                                    .disabled(
+                                        busy
+                                            || automatic_schedule.duration_minutes
+                                                >= MAX_SLEEP_TIMER_MINUTES,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_draft.automatic_sleep_timer.duration_minutes =
+                                            this.settings_draft
+                                                .automatic_sleep_timer
+                                                .duration_minutes
+                                                .saturating_add(5)
+                                                .min(MAX_SLEEP_TIMER_MINUTES);
+                                        this.settings_error = None;
+                                        this.settings_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(div().text_sm().font_medium().child("Presets"))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new("automatic-sleep-preset-daily")
+                                    .label("Daily")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_automatic_sleep_timer_preset(
+                                            AutomaticSleepTimerPreset::Daily,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("automatic-sleep-preset-weekdays")
+                                    .label("Weekdays")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_automatic_sleep_timer_preset(
+                                            AutomaticSleepTimerPreset::Weekdays,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("automatic-sleep-preset-weekends")
+                                    .label("Weekends")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_automatic_sleep_timer_preset(
+                                            AutomaticSleepTimerPreset::Weekends,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(div().text_sm().font_medium().child("Custom days"))
+                    .children(automatic_day_rows),
             )
             .into_any_element()
     }
@@ -25545,59 +26230,178 @@ impl MetrolistShell {
         host_controlled: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let selection_count = self.queue_selected_video_ids.len();
+        let all_selected = self.queue_selection_is_all_selected();
         h_flex()
             .w_full()
             .flex_shrink_0()
             .items_center()
+            .flex_wrap()
             .gap_1()
             .px_3()
             .py_2()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                icon_ghost_button(
-                    format!("{id_prefix}-shuffle"),
-                    IconName::ChevronsUpDown,
-                    if self.shuffle_enabled {
-                        "Shuffle on"
-                    } else {
-                        "Shuffle off"
-                    },
-                )
-                .selected(self.shuffle_enabled)
-                .disabled(host_controlled || self.queue.is_empty())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
-            )
-            .child(
-                icon_ghost_button(
-                    format!("{id_prefix}-repeat"),
-                    IconName::Redo2,
-                    self.repeat_mode.label(),
-                )
-                .selected(self.repeat_mode != RepeatMode::Off)
-                .disabled(host_controlled || self.queue.is_empty())
-                .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
-            )
-            .child(
-                Button::new(format!("{id_prefix}-clear-upcoming"))
+                Button::new(format!("{id_prefix}-select"))
                     .ghost()
                     .compact()
-                    .icon(IconName::Delete)
-                    .label("Clear")
-                    .tooltip("Keep the current song and remove everything after it")
-                    .disabled(host_controlled || self.queue.remaining_after_current() == 0)
-                    .on_click(cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx))),
+                    .label(if self.queue_selection_mode {
+                        "Selecting"
+                    } else {
+                        "Select"
+                    })
+                    .selected(self.queue_selection_mode)
+                    .disabled(host_controlled || self.queue.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_queue_selection_mode(cx);
+                    })),
             )
+            .when(!self.queue_selection_mode, |row| {
+                row.child(
+                    icon_ghost_button(
+                        format!("{id_prefix}-shuffle"),
+                        IconName::ChevronsUpDown,
+                        if self.shuffle_enabled {
+                            "Shuffle on"
+                        } else {
+                            "Shuffle off"
+                        },
+                    )
+                    .selected(self.shuffle_enabled)
+                    .disabled(host_controlled || self.queue.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
+                )
+                .child(
+                    icon_ghost_button(
+                        format!("{id_prefix}-repeat"),
+                        IconName::Redo2,
+                        self.repeat_mode.label(),
+                    )
+                    .selected(self.repeat_mode != RepeatMode::Off)
+                    .disabled(host_controlled || self.queue.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-clear-upcoming"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Delete)
+                        .label("Clear")
+                        .tooltip("Keep the current song and remove everything after it")
+                        .disabled(host_controlled || self.queue.remaining_after_current() == 0)
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx))),
+                )
+            })
+            .when(self.queue_selection_mode, |row| {
+                row.child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child(format!("{selection_count} selected")),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-toggle-all"))
+                        .ghost()
+                        .compact()
+                        .label(if all_selected {
+                            "Clear all"
+                        } else {
+                            "Select all"
+                        })
+                        .disabled(host_controlled || self.queue.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_all_queue_selection(cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-done"))
+                        .ghost()
+                        .compact()
+                        .label("Done")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.exit_queue_selection(cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-play"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Play)
+                        .label("Play")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.play_selected_queue(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-shuffle"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::ChevronsUpDown)
+                        .label("Shuffle")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.shuffle_selected_queue(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-queue"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Plus)
+                        .label("Add to queue")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_selected_queue(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-playlist"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Plus)
+                        .label("Add to local playlist")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_selected_queue_to_local_playlist(cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-download"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::HardDrive)
+                        .label("Download")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.download_selected_queue(cx);
+                        })),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-selection-remove"))
+                        .danger()
+                        .compact()
+                        .icon(IconName::Delete)
+                        .label("Remove selected")
+                        .disabled(host_controlled || selection_count == 0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.remove_selected_queue_items(window, cx);
+                        })),
+                )
+            })
             .child(div().flex_1())
-            .child(self.render_sleep_timer_button(
-                if id_prefix == "now-playing" {
-                    "now-playing-sleep-timer"
-                } else {
-                    "queue-sleep-timer"
-                },
-                host_controlled,
-                cx,
-            ))
+            .when(!self.queue_selection_mode, |row| {
+                row.child(self.render_sleep_timer_button(
+                    if id_prefix == "now-playing" {
+                        "now-playing-sleep-timer"
+                    } else {
+                        "queue-sleep-timer"
+                    },
+                    host_controlled,
+                    cx,
+                ))
+            })
     }
 
     fn render_queue_row(
@@ -25610,6 +26414,8 @@ impl MetrolistShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_current = current_index == Some(index);
+        let selected = self.queue_selected_video_ids.contains(&item.song.video_id);
+        let selection_video_id = item.song.video_id.clone();
         let favorite = if item.song.is_episode {
             self.is_episode_saved(&item.song.video_id)
         } else {
@@ -25866,7 +26672,11 @@ impl MetrolistShell {
             .when(is_current, |row| row.bg(cx.theme().secondary))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if !host_controlled {
-                    this.play_queue_item(index, window, cx);
+                    if this.queue_selection_mode {
+                        this.toggle_queue_selection(selection_video_id.clone(), cx);
+                    } else {
+                        this.play_queue_item(index, window, cx);
+                    }
                 }
             }))
             .child(
@@ -25907,45 +26717,62 @@ impl MetrolistShell {
                     .text_color(cx.theme().muted_foreground)
                     .child(duration),
             )
-            .child(
-                icon_ghost_button(
-                    format!("queue-favorite-{index}"),
-                    IconName::Heart,
-                    if favorite {
-                        "Remove from favourites"
-                    } else {
-                        "Add to favourites"
-                    },
+            .when(self.queue_selection_mode, |row| {
+                row.child(
+                    Button::new(format!("queue-select-{index}"))
+                        .ghost()
+                        .compact()
+                        .label(if selected { "Selected" } else { "Select" })
+                        .selected(selected)
+                        .on_click(cx.listener({
+                            let selection_video_id = item.song.video_id.clone();
+                            move |this, _, _, cx| {
+                                this.toggle_queue_selection(selection_video_id.clone(), cx);
+                            }
+                        })),
                 )
-                .selected(favorite)
-                .disabled(if item.song.is_episode {
-                    self.podcast_busy()
-                } else {
-                    self.library_busy()
-                })
-                .on_click(cx.listener({
-                    let favorite_song = item.song.clone();
-                    move |this, _, _, cx| {
-                        if favorite_song.is_episode {
-                            this.toggle_episode_for_later(favorite_song.clone(), cx);
+            })
+            .when(!self.queue_selection_mode, |row| {
+                row.child(
+                    icon_ghost_button(
+                        format!("queue-favorite-{index}"),
+                        IconName::Heart,
+                        if favorite {
+                            "Remove from favourites"
                         } else {
-                            this.toggle_favorite(favorite_song.clone(), cx);
+                            "Add to favourites"
+                        },
+                    )
+                    .selected(favorite)
+                    .disabled(if item.song.is_episode {
+                        self.podcast_busy()
+                    } else {
+                        self.library_busy()
+                    })
+                    .on_click(cx.listener({
+                        let favorite_song = item.song.clone();
+                        move |this, _, _, cx| {
+                            if favorite_song.is_episode {
+                                this.toggle_episode_for_later(favorite_song.clone(), cx);
+                            } else {
+                                this.toggle_favorite(favorite_song.clone(), cx);
+                            }
                         }
-                    }
-                })),
-            )
-            .child(
-                icon_ghost_button(
-                    format!("queue-remove-{index}"),
-                    IconName::Delete,
-                    "Remove from queue",
+                    })),
                 )
-                .disabled(host_controlled)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.remove_queue_item(index, window, cx);
-                })),
-            )
-            .child(more)
+                .child(
+                    icon_ghost_button(
+                        format!("queue-remove-{index}"),
+                        IconName::Delete,
+                        "Remove from queue",
+                    )
+                    .disabled(host_controlled)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.remove_queue_item(index, window, cx);
+                    })),
+                )
+                .child(more)
+            })
             .into_any_element()
     }
 
@@ -26049,6 +26876,7 @@ impl MetrolistShell {
                             .label("Close")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.queue_visible = false;
+                                this.clear_queue_selection();
                                 cx.notify();
                             })),
                     ),
@@ -26800,12 +27628,11 @@ impl MetrolistShell {
 
     fn render_now_playing_queue(&self, cx: &mut Context<Self>) -> AnyElement {
         let host_controlled = self.listen_together_is_guest();
-        let start = self.queue.current_index().unwrap_or_default();
         v_flex()
             .size_full()
             .min_h_0()
             .child(self.render_queue_toolbar("now-playing", host_controlled, cx))
-            .child(self.render_virtual_queue_list("now-playing-queue", start, cx))
+            .child(self.render_virtual_queue_list("now-playing-queue", 0, cx))
             .into_any_element()
     }
 
@@ -28406,7 +29233,11 @@ impl MetrolistShell {
                                             this.lyrics_state = LyricsViewState::Idle;
                                         }
                                         this.lyrics_task = None;
-                                        this.queue_visible = !this.queue_visible;
+                                        let opening = !this.queue_visible;
+                                        if !opening {
+                                            this.clear_queue_selection();
+                                        }
+                                        this.queue_visible = opening;
                                         cx.notify();
                                     })),
                             ),
@@ -28698,6 +29529,10 @@ fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
+fn format_clock_minute(minute: u16) -> String {
+    format!("{:02}:{:02}", minute / 60, minute % 60)
+}
+
 fn format_equalizer_frequency(frequency_hz: u32) -> String {
     if frequency_hz >= 1_000 {
         if frequency_hz.is_multiple_of(1_000) {
@@ -28946,6 +29781,7 @@ mod tests {
             &StoredViewState::Loaded(Vec::new()),
             &StoredViewState::Failed("podcasts offline".into()),
             &StoredViewState::Loading,
+            &StoredViewState::Loading,
             &StoredViewState::Loaded(Vec::new()),
             &StoredViewState::Failed("downloads offline".into()),
         );
@@ -28957,6 +29793,7 @@ mod tests {
                 favorites: false,
                 podcasts: true,
                 episodes: false,
+                local_playlist_songs: false,
                 playlists: false,
                 downloads: true,
             }
@@ -28965,6 +29802,7 @@ mod tests {
 
         let healthy = LocalLibraryRetryTargets::from_states(
             &HistoryViewState::Loaded(Vec::new()),
+            &StoredViewState::Loaded(Vec::new()),
             &StoredViewState::Loaded(Vec::new()),
             &StoredViewState::Loaded(Vec::new()),
             &StoredViewState::Loaded(Vec::new()),
