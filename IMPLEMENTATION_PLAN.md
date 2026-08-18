@@ -24,6 +24,32 @@ Android Metrolist 只读参考业务行为和点击路径；桌面 UI 以锁定�
 
 P2/P3 已存在的代码只做回归维护，在 P0 矩阵全部完成前不得继续扩展。
 
+## 已实现切片：Content Settings 过滤
+
+状态：功能、持久化与 UI 已实现，待真实桌面列表点击验收。
+
+Android `ContentSettings.kt` 提供 Hide explicit / Hide video songs / Hide YouTube Shorts，默认全部关闭；`YTItem` 用真实 explicit 徽章、`musicVideoType != ATV` 以及歌单 id（去掉 `VL` 后以 `SS` 开头）过滤列表。Desktop 已接通内容语言/国家，但还没有这三项开关，解析也不保留上述标记。本切片只增加可测试的 parse → classify → filter，并把已保存设置接到现有五类列表与由列表发起的 Play all；不重写正在播放的队列。
+
+### 代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/domain/song.rs` / `browse.rs` / `home.rs` / `content_filter.rs` | 保留 explicit / music-video-type / Shorts 身份，实现 Android 同规则纯过滤 |
+| `src/services/innertube.rs` | 从徽章与 watchEndpoint 解析上述标记 |
+| `src/config.rs` / `src/storage/sqlite.rs` | 持久化三项开关，默认关闭，schema v47 |
+| `src/ui/shell.rs` / `src/ui/settings_nav.rs` | Settings 可点击开关；五类列表与 Play all 使用已保存过滤 |
+| `CORE_UI_PARITY.md` / `PORTING_PLAN.md` | 登记点击路径，不再把剩余 Android 工作写成已关闭 |
+
+### 完成定义
+
+1. Settings 可发现三项开关，默认关闭；保存后跨重启保留，Reset 恢复已保存值；非法设置不能半保存。
+2. 开启后：explicit 项隐藏；`musicVideoType` 存在且不是 ATV 的歌曲隐藏；id 去 `VL` 后以 `SS` 开头的歌单/浏览项隐藏。缺少真实标记的项保留。
+3. Home、Explore、Search、Browse、Library 的列表与由这些列表发起的 Play all 使用过滤后的集合；关闭开关后下次加载（或已保存设置的下一次渲染）重新显示。
+4. 已在播放的队列不因开关变化被改写。过滤后为空显示空态，不挂起或伪造成功。
+5. 不修改 Android 仓库。parse → classify → filter 可由 fixture / 构造项直接驱动。
+
+完成情况：`Song`/`BrowseItem` 现保留 explicit 徽章与 `musicVideoType`；Shorts 按去 `VL` 后以 `SS` 开头判断。`ContentFilters` 复用 Android 规则：缺标记的项保留，ATV 在 Hide video songs 开启时仍显示，非 ATV 视频歌、explicit 项和 SS 歌单分别由对应开关隐藏。InnerTube 解析从 badges/subtitleBadges 与 watchEndpoint 读取真实标记。`AppSettings` 与 SQLite v47 持久化三项开关（默认关闭）及歌曲标记；保存先整体校验，非法设置不会半写入。Settings Appearance 增加三个可点击开关；Home、Explore、Search、Browse、Library 列表与由这些列表发起的 Play all 使用已保存过滤，过滤后为空显示空态。保存设置会刷新列表但不会改写正在播放的队列。Reset 恢复已保存值。
+
 ## 已实现切片：Automatic Sleep Timer Schedule
 
 状态：功能、持久化与 UI 已实现，待真实桌面时区/播放转换点击验收。

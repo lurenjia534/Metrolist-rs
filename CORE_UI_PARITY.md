@@ -63,6 +63,7 @@
 | Recognize → 匹配 → 历史/播放/搜索 | `RecognitionScreen.kt`、`RecognitionHistoryScreen.kt`、`MusicRecognitionService`、ShazamKit | 点击录音、真实 Shazam 匹配、Match/No match/Error；成功结果自动保存，可从 History 重新搜索、单删或清空，并进入 YouTube Music 播放或搜索 | 已实现，待真实麦克风点击验收 |
 | 设置 → 音频/代理/音质/均衡器 | Android Settings 各屏 | 编辑、保存并即时作用于真实服务 | 已实现，待桌面点击验收 |
 | 设置 → 内容语言/国家地区 | `ContentSettings.kt` 的 Content language / Content country，`App.kt` 的 YouTube locale 应用 | 两个可滚动下拉入口分别提供跟随系统及 Android 当前完整选项；保存后统一重建 InnerTube 并让 Home、Explore、Search、Browse、Radio 与账号资料库使用解析后的 `hl/gl`，Reset 只恢复已保存值 | 已实现，待真实桌面区域内容点击验收 |
+| 设置 → 内容过滤 | `ContentSettings.kt` 的 Hide explicit / Hide video songs / Hide YouTube Shorts，`YTItem.filterExplicit` / `filterVideoSongs` / `filterYoutubeShorts` | Appearance 提供三个可点击开关，默认关闭；保存后跨重启保留，Reset 恢复已保存值；Home、Explore、Search、Browse、Library 列表与由这些列表发起的 Play all 按 Android 规则隐藏 explicit 项、非 ATV 视频歌、以及去 `VL` 后以 `SS` 开头的歌单；缺少真实标记的项保留；已在播放的队列不因开关被改写；过滤后为空显示空态 | 已实现，待真实桌面列表点击验收 |
 | 设置 → 静音暂停 | `PlayerSettings.kt` 的 Pause music when media is muted | 默认音量归零仍继续播放；开启后本地滑杆或系统媒体音量归零会暂停，只有该静音动作造成的暂停会在恢复音量后继续，手动控制和 Guest 音量同步不误触发 | 已实现，待真实桌面音量点击验收 |
 | 设置 → 渐进封面 Seek | `PlayerSettings.kt` 的 Progressive seek、`Thumbnail.kt` 的 `onDoubleTap` | 完整播放器封面左右半区双击默认快退/快进 5 秒；开启后，一秒内连续双击按 5、10、15…秒递增，复用真实播放位置与时长裁剪，Guest 不可操作 | 已实现，待真实桌面封面双击验收 |
 | 设置 → Skip silence / Instant skip | `PlayerSettings.kt` 的 Skip silence / Instant skip、`MusicService` 的静音处理 | 默认完整播放 PCM；开启后按全声道近静音 frame 保留短静音并压缩持续静音，Instant 在连续 2 秒后直接跳过剩余静音；跳过时长计入真实媒体位置，进度、歌词、历史、外部状态与 Sleep Timer 保持对齐 | 已实现，待真实桌面静音音轨点击验收 |
