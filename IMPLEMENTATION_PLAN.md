@@ -24,10 +24,10 @@ Android Metrolist 只读参考业务行为和点击路径；桌面 UI 以锁定�
 
 P2/P3 已存在的代码只做回归维护，在 P0 矩阵全部完成前不得继续扩展。
 
-## 进行中：gpui-component Styled UI 美化（并行 worktree）
+## 已实现切片：gpui-component Styled UI 美化（并行 worktree）
 
-状态：进行中。用户明确要求多个 worktree + 多个子代理并行改 UI。本轮覆盖
-视觉与组件用法，不新开业务功能。
+状态：功能与 UI 已合入 master，待真实桌面点击验收。用户明确要求多个
+worktree + 多个子代理并行改 UI。本轮覆盖视觉与组件用法，不新开业务功能。
 
 界面已能工作，但大量入口仍是手写 `div`/`h_flex`，没有系统使用锁定
 `gpui-component`（`f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c`）的 Styled
@@ -58,6 +58,16 @@ library/chrome 抢同一文件尾部。
 4. 不改业务状态机、点击语义、网络、SQLite；不删 `CORE_UI_PARITY.md` 入口。
 5. 各 worktree 只跑一次 `cargo fmt --all && cargo check --all-targets`。
 6. 合并后主仓库再跑同一最小门禁。
+
+完成情况：五个 worktree 已分别提交并 cherry-pick 到 master。
+`src/ui/styled.rs` 提供 page/section header、empty/error/loading、GroupBox
+卡片和 chip/icon 按钮；`widgets.rs` 瓦片/行使用主题 radius、边框和 hover。
+窗口使用 `TitleBar::window_options()`，`Render` 挂 TitleBar、Search/Settings
+快捷入口、账号 Avatar 以及 Root dialog/sheet/notification 层。Home/Explore/
+Search/Browse、Library/History/Stats/Recognize、迷你播放器与完整 Now Playing/
+队列侧栏改为 GroupBox、Alert、Skeleton、Spinner、Tag、TabBar、Button 变体。
+设置页本轮未单独改版（已使用 `Settings`）。行为与点击入口未删。
+主仓库 `cargo fmt --all && cargo check --all-targets` 已通过。
 
 ## 已实现切片：Content Settings 过滤
 
