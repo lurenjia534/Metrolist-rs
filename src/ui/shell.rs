@@ -27903,7 +27903,6 @@ impl MetrolistShell {
         } else {
             IconName::Play
         };
-        let has_current_song = self.current_song.is_some();
         let radio_matches_current = self
             .current_song
             .as_ref()
@@ -28005,201 +28004,157 @@ impl MetrolistShell {
                 .into_any_element()
         });
 
-        h_flex()
-            .min_h(if compact { px(108.) } else { px(72.) })
-            .when(!compact, |player| player.h(px(72.)))
+        v_flex()
+            .w_full()
             .flex_shrink_0()
-            .flex_wrap()
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
             .px_4()
-            .py_2()
-            .gap_3()
-            .items_center()
+            .pt_2()
+            .pb_2()
+            .gap_1()
             .child(
                 h_flex()
-                    .id("open-now-playing")
-                    .w(if compact { px(200.) } else { px(248.) })
-                    .min_w_0()
+                    .w_full()
                     .gap_3()
                     .items_center()
-                    .cursor_pointer()
-                    .rounded(cx.theme().radius)
-                    .p_1()
-                    .hover(|style| style.bg(cx.theme().background))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(cx)))
-                    .child(
-                        self.render_thumbnail(
-                            self.current_song
-                                .as_ref()
-                                .and_then(|song| song.thumbnail_url.as_deref()),
-                            px(52.),
-                            IconName::Play,
-                            cx,
-                        ),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(title_line(title).text_sm())
-                            .child(caption_line(subtitle, cx.theme().muted_foreground)),
-                    )
-                    .when(has_current_song, |metadata| {
-                        metadata.child(
-                            Icon::new(IconName::Maximize)
-                                .size_4()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                    }),
-            )
-            .when_some(mini_actions, |player, actions| player.child(actions))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(280.))
-                    .gap_1()
-                    .items_center()
+                    .flex_wrap()
                     .child(
                         h_flex()
-                            .gap_2()
+                            .id("open-now-playing")
+                            .w(if compact { px(220.) } else { px(280.) })
+                            .min_w_0()
+                            .gap_3()
                             .items_center()
+                            .cursor_pointer()
+                            .rounded(cx.theme().radius)
+                            .p_1()
+                            .hover(|style| style.bg(cx.theme().background))
+                            .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(cx)))
                             .child(
-                                icon_ghost_button(
-                                    "shuffle",
-                                    IconName::ChevronsUpDown,
-                                    "Randomize the remaining queue",
-                                )
-                                .selected(self.shuffle_enabled)
-                                .disabled(host_controlled || self.queue.is_empty())
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
+                                self.render_thumbnail(
+                                    self.current_song
+                                        .as_ref()
+                                        .and_then(|song| song.thumbnail_url.as_deref()),
+                                    px(48.),
+                                    IconName::Play,
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(title_line(title).text_sm())
+                                    .child(caption_line(subtitle, cx.theme().muted_foreground)),
+                            ),
+                    )
+                    .when_some(mini_actions, |player, actions| player.child(actions))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w(px(240.))
+                            .justify_center()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new("shuffle")
+                                    .ghost()
+                                    .compact()
+                                    .label("Shuffle")
+                                    .tooltip("Randomize the remaining queue")
+                                    .selected(self.shuffle_enabled)
+                                    .disabled(host_controlled || self.queue.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         this.toggle_shuffle(cx);
-                                    },
-                                )),
+                                    })),
                             )
                             .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().background)
-                                    .px_1()
-                                    .py_0p5()
-                                    .child(
-                                        Button::new("previous")
-                                            .ghost()
-                                            .compact()
-                                            .icon(IconName::ArrowLeft)
-                                            .tooltip("Previous")
-                                            .disabled(
-                                                host_controlled
-                                                    || self.current_song.is_none()
-                                                    || (!self.queue.has_previous()
-                                                        && self.repeat_mode != RepeatMode::All
-                                                        && snapshot.position
-                                                            < Duration::from_secs(5)),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.play_previous(window, cx);
-                                            })),
+                                Button::new("previous")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::ArrowLeft)
+                                    .tooltip("Previous")
+                                    .disabled(
+                                        host_controlled
+                                            || self.current_song.is_none()
+                                            || (!self.queue.has_previous()
+                                                && self.repeat_mode != RepeatMode::All
+                                                && snapshot.position < Duration::from_secs(5)),
                                     )
-                                    .child(
-                                        Button::new("play")
-                                            .primary()
-                                            .icon(play_icon)
-                                            .tooltip(if state == PlaybackState::Playing {
-                                                "Pause"
-                                            } else {
-                                                "Play"
-                                            })
-                                            .disabled(!can_toggle)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.toggle_playback(window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("next")
-                                            .ghost()
-                                            .compact()
-                                            .icon(IconName::ArrowRight)
-                                            .tooltip("Next")
-                                            .disabled(
-                                                host_controlled
-                                                    || self.current_song.is_none()
-                                                    || (!self.queue.has_next()
-                                                        && self.repeat_mode != RepeatMode::All),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.play_next(window, cx);
-                                            })),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.play_previous(window, cx);
+                                    })),
                             )
                             .child(
-                                icon_ghost_button(
-                                    "repeat",
-                                    IconName::Redo2,
-                                    format!(
+                                Button::new("play")
+                                    .primary()
+                                    .icon(play_icon)
+                                    .tooltip(if state == PlaybackState::Playing {
+                                        "Pause"
+                                    } else {
+                                        "Play"
+                                    })
+                                    .disabled(!can_toggle)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_playback(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("next")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::ArrowRight)
+                                    .tooltip("Next")
+                                    .disabled(
+                                        host_controlled
+                                            || self.current_song.is_none()
+                                            || (!self.queue.has_next()
+                                                && self.repeat_mode != RepeatMode::All),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.play_next(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("repeat")
+                                    .ghost()
+                                    .compact()
+                                    .label(self.repeat_mode.label())
+                                    .tooltip(format!(
                                         "{} — cycle off, all, and one",
                                         self.repeat_mode.label()
-                                    ),
-                                )
-                                .selected(self.repeat_mode != RepeatMode::Off)
-                                .disabled(host_controlled || self.queue.is_empty())
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
+                                    ))
+                                    .selected(self.repeat_mode != RepeatMode::Off)
+                                    .disabled(host_controlled || self.queue.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         this.cycle_repeat_mode(cx);
-                                    },
-                                )),
+                                    })),
                             ),
                     )
                     .child(
                         h_flex()
-                            .w_full()
-                            .gap_3()
+                            .flex_shrink_0()
+                            .gap_1()
                             .items_center()
-                            .child(Self::player_time_label(
-                                format_duration(display_position),
-                                cx,
-                            ))
+                            .flex_wrap()
                             .child(
-                                div().flex_1().child(
-                                    Slider::new(&self.progress_slider)
-                                        .horizontal()
-                                        .disabled(!can_seek),
-                                ),
-                            )
-                            .child(Self::player_time_label(
-                                duration
-                                    .map(format_duration)
-                                    .unwrap_or_else(|| "0:00".into()),
-                                cx,
-                            )),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .w(if compact { px(220.) } else { px(280.) })
-                    .when(compact, |panel| panel.w_full())
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(Self::player_time_label(
-                                format!("{:.0}%", snapshot.volume * 100.0),
-                                cx,
-                            ))
-                            .child(
-                                div().flex_1().min_w(px(72.)).max_w(px(160.)).child(
-                                    Slider::new(&self.volume_slider)
-                                        .horizontal()
-                                        .disabled(host_controlled),
-                                ),
+                                h_flex()
+                                    .w(px(140.))
+                                    .gap_2()
+                                    .items_center()
+                                    .child(Self::player_time_label(
+                                        format!("{:.0}%", snapshot.volume * 100.0),
+                                        cx,
+                                    ))
+                                    .child(
+                                        div().flex_1().child(
+                                            Slider::new(&self.volume_slider)
+                                                .horizontal()
+                                                .disabled(host_controlled),
+                                        ),
+                                    ),
                             )
                             .when_some(snapshot.normalization_gain_mb, |labels, gain_mb| {
                                 labels.child(
@@ -28211,16 +28166,6 @@ impl MetrolistShell {
                             .when(snapshot.equalizer_active, |labels| {
                                 labels.child(Tag::secondary().small().child("EQ"))
                             })
-                            .when(radio_matches_current, |labels| {
-                                labels.child(Tag::info().small().child("Radio"))
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .flex_wrap()
-                            .gap_1()
                             .child(
                                 Button::new("playback-parameters")
                                     .ghost()
@@ -28309,6 +28254,29 @@ impl MetrolistShell {
                                 cx,
                             )),
                     ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(Self::player_time_label(
+                        format_duration(display_position),
+                        cx,
+                    ))
+                    .child(
+                        div().flex_1().child(
+                            Slider::new(&self.progress_slider)
+                                .horizontal()
+                                .disabled(!can_seek),
+                        ),
+                    )
+                    .child(Self::player_time_label(
+                        duration
+                            .map(format_duration)
+                            .unwrap_or_else(|| "0:00".into()),
+                        cx,
+                    )),
             )
     }
 }
