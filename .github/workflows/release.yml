@@ -134,9 +134,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $installed = cargo-bundle --version 2>$null
-          if ($LASTEXITCODE -ne 0 -or $installed -notmatch [regex]::Escape($env:CARGO_BUNDLE_VERSION)) {
+          $command = Get-Command cargo-bundle -ErrorAction SilentlyContinue
+          if (-not $command) {
             cargo install cargo-bundle --version $env:CARGO_BUNDLE_VERSION --locked --force
+          } else {
+            $installed = cargo-bundle --version
+            if ($LASTEXITCODE -ne 0 -or $installed -notmatch [regex]::Escape($env:CARGO_BUNDLE_VERSION)) {
+              cargo install cargo-bundle --version $env:CARGO_BUNDLE_VERSION --locked --force
+            }
           }
 
       - name: Build locked release binary
