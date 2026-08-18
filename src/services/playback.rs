@@ -1003,6 +1003,8 @@ mod tests {
                 thumbnail_url: None,
                 album: None,
                 is_episode: false,
+                explicit: false,
+                music_video_type: None,
             },
         }
     }

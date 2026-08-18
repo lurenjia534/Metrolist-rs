@@ -878,6 +878,8 @@ mod tests {
             thumbnail_url: None,
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         };
         let mut tracker = LastFmPlaybackTracker::default();
 
@@ -962,6 +964,8 @@ mod tests {
             thumbnail_url: None,
             album: None,
             is_episode: true,
+            explicit: false,
+            music_video_type: None,
         };
         assert!(LastFmTrack::from_song(&episode).is_err());
 

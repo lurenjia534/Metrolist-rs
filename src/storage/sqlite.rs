@@ -20,7 +20,7 @@ use crate::domain::{AlbumCredit, BrowseItem, BrowseKind, LyricsDocument, LyricsL
 use crate::services::{RecognitionResult, RepeatMode};
 use crate::{AppError, Result};
 
-const SCHEMA_VERSION: i64 = 46;
+const SCHEMA_VERSION: i64 = 47;
 const LOCAL_PLAYLIST_PREVIEW_COLUMNS: &str = r#"
     (SELECT s.thumbnail_url
      FROM local_playlist_song preview
@@ -2149,6 +2149,9 @@ fn open_and_migrate(path: &Path) -> Result<Connection> {
     if current_version < 46 {
         migrate_to_v46(&mut connection)?;
     }
+    if current_version < 47 {
+        migrate_to_v47(&mut connection)?;
+    }
     Ok(connection)
 }
 
@@ -3216,6 +3219,35 @@ fn migrate_to_v46(connection: &mut Connection) -> Result<()> {
     transaction.commit().map_err(storage_error)
 }
 
+fn migrate_to_v47(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE app_settings
+                 ADD COLUMN hide_explicit INTEGER NOT NULL DEFAULT 0
+                 CHECK(hide_explicit IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN hide_video_songs INTEGER NOT NULL DEFAULT 0
+                 CHECK(hide_video_songs IN (0, 1));
+             ALTER TABLE app_settings
+                 ADD COLUMN hide_youtube_shorts INTEGER NOT NULL DEFAULT 0
+                 CHECK(hide_youtube_shorts IN (0, 1));
+             ALTER TABLE song
+                 ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0
+                 CHECK(explicit IN (0, 1));
+             ALTER TABLE song
+                 ADD COLUMN music_video_type TEXT;",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, applied_at_ms) VALUES (47, ?1)",
+            [now_ms()],
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
 fn record_history(connection: &mut Connection, song: &Song, play_time: Duration) -> Result<()> {
     let transaction = connection.transaction().map_err(storage_error)?;
     upsert_song(&transaction, song)?;
@@ -3238,7 +3270,8 @@ fn recent_history(connection: &Connection, limit: usize) -> Result<Vec<HistoryEn
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM play_history h
              JOIN song s ON s.video_id = h.video_id
              ORDER BY h.played_at_ms DESC, h.id DESC
@@ -3281,7 +3314,8 @@ fn forgotten_favorites(connection: &Connection, limit: usize) -> Result<Vec<Song
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM play_totals totals
              JOIN song s ON s.video_id = totals.video_id
              WHERE totals.recent_play_time > 0
@@ -3316,7 +3350,8 @@ fn keep_listening(connection: &Connection, limit: usize, offset: usize) -> Resul
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM top_songs
              JOIN song s ON s.video_id = top_songs.video_id
              ORDER BY top_songs.time_listened DESC, s.video_id ASC",
@@ -3353,7 +3388,8 @@ fn listening_stats(connection: &Connection, start_ms: i64, limit: usize) -> Resu
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM play_history h
              JOIN song s ON s.video_id = h.video_id
              WHERE h.played_at_ms >= ?1
@@ -3677,6 +3713,7 @@ fn catalog_items(connection: &Connection, limit: usize) -> Result<Vec<BrowseItem
                 thumbnail_url: row.get(4)?,
                 params: row.get(5)?,
                 editable: false,
+                explicit: false,
             })
         })
         .map_err(storage_error)?;
@@ -3715,7 +3752,8 @@ fn favorites(connection: &Connection, limit: usize) -> Result<Vec<FavoriteEntry>
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM favorite_song f
              JOIN song s ON s.video_id = f.video_id
              ORDER BY f.liked_at_ms DESC, f.video_id ASC
@@ -3763,7 +3801,8 @@ fn speed_dial_songs(connection: &Connection) -> Result<Vec<Song>> {
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM speed_dial_song d
              JOIN song s ON s.video_id = d.video_id
              ORDER BY d.pinned_at_ms ASC, d.video_id ASC",
@@ -3850,6 +3889,7 @@ fn speed_dial_browse_items(connection: &Connection) -> Result<Vec<BrowseItem>> {
                 thumbnail_url: row.get(4)?,
                 params: row.get(5)?,
                 editable: false,
+                explicit: false,
             })
         })
         .map_err(storage_error)?;
@@ -4079,7 +4119,8 @@ fn episodes_for_later(connection: &Connection) -> Result<Vec<SavedEpisode>> {
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM episode_for_later e
              JOIN song s ON s.video_id = e.video_id
              LEFT JOIN episode_playback_position p ON p.video_id = e.video_id
@@ -4487,7 +4528,8 @@ fn local_playlist_songs(connection: &Connection) -> Result<Vec<Song>> {
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM local_playlist_song ps
              JOIN song s ON s.video_id = ps.video_id
              ORDER BY s.video_id ASC",
@@ -4507,7 +4549,8 @@ fn playlist_songs(connection: &Connection, playlist_id: i64) -> Result<Vec<Song>
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM local_playlist_song ps
              JOIN song s ON s.video_id = ps.video_id
              WHERE ps.playlist_id = ?1
@@ -4839,7 +4882,8 @@ fn load_session(connection: &Connection) -> Result<Option<PersistedSession>> {
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM queue_item q
              JOIN song s ON s.video_id = q.video_id
              ORDER BY q.position ASC",
@@ -5071,8 +5115,9 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  sleep_timer_fade_out, automatic_sleep_timer_schedule,
                  skip_silence, skip_silence_instant,
                  crossfade, crossfade_seconds, crossfade_gapless_albums,
-                 content_language, content_country
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58)
+                 content_language, content_country,
+                 hide_explicit, hide_video_songs, hide_youtube_shorts
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60, ?61)
              ON CONFLICT(singleton) DO UPDATE SET
                  proxy_enabled = excluded.proxy_enabled,
                  proxy_kind = excluded.proxy_kind,
@@ -5131,7 +5176,10 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                  crossfade_seconds = excluded.crossfade_seconds,
                  crossfade_gapless_albums = excluded.crossfade_gapless_albums,
                  content_language = excluded.content_language,
-                 content_country = excluded.content_country",
+                 content_country = excluded.content_country,
+                 hide_explicit = excluded.hide_explicit,
+                 hide_video_songs = excluded.hide_video_songs,
+                 hide_youtube_shorts = excluded.hide_youtube_shorts",
             params![
                 settings.proxy.enabled,
                 settings.proxy.kind.storage_value(),
@@ -5191,6 +5239,9 @@ fn save_settings(connection: &mut Connection, settings: AppSettings) -> Result<(
                 settings.crossfade_gapless_albums,
                 settings.content_language,
                 settings.content_country,
+                settings.hide_explicit,
+                settings.hide_video_songs,
+                settings.hide_youtube_shorts,
             ],
         )
         .map_err(storage_error)?;
@@ -5224,7 +5275,8 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     sleep_timer_fade_out, automatic_sleep_timer_schedule,
                     skip_silence, skip_silence_instant,
                     crossfade, crossfade_seconds, crossfade_gapless_albums,
-                    content_language, content_country
+                    content_language, content_country,
+                    hide_explicit, hide_video_songs, hide_youtube_shorts
              FROM app_settings WHERE singleton = 1",
             [],
             |row| {
@@ -5286,6 +5338,9 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
                     row.get::<_, bool>(54)?,
                     row.get::<_, String>(55)?,
                     row.get::<_, String>(56)?,
+                    row.get::<_, bool>(57)?,
+                    row.get::<_, bool>(58)?,
+                    row.get::<_, bool>(59)?,
                 ))
             },
         )
@@ -5349,6 +5404,9 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         crossfade_gapless_albums,
         content_language,
         content_country,
+        hide_explicit,
+        hide_video_songs,
+        hide_youtube_shorts,
     )) = stored
     else {
         return Ok(None);
@@ -5392,6 +5450,9 @@ fn load_settings(connection: &Connection) -> Result<Option<AppSettings>> {
         },
         content_language,
         content_country,
+        hide_explicit,
+        hide_video_songs,
+        hide_youtube_shorts,
         audio_quality: AudioQuality::from_storage(&audio_quality)?,
         audio_normalization,
         loudness_level: LoudnessLevel::from_storage(&loudness_level)?,
@@ -5764,7 +5825,8 @@ fn downloads(connection: &Connection) -> Result<Vec<AudioDownload>> {
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM audio_download d
              JOIN song s ON s.video_id = d.video_id
              ORDER BY COALESCE(d.completed_at_ms, d.updated_at_ms) DESC, d.video_id ASC",
@@ -5788,7 +5850,8 @@ fn download_by_id(connection: &Connection, video_id: &str) -> Result<Option<Audi
                     s.is_episode,
                     (SELECT browse_id FROM song_album WHERE video_id = s.video_id),
                     (SELECT title FROM song_album WHERE video_id = s.video_id),
-                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id)
+                    (SELECT thumbnail_url FROM song_album WHERE video_id = s.video_id),
+                    s.explicit, s.music_video_type
              FROM audio_download d
              JOIN song s ON s.video_id = d.video_id
              WHERE d.video_id = ?1",
@@ -5884,6 +5947,8 @@ fn song_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Son
                 thumbnail_url: album_thumbnail_url,
             }),
         is_episode: row.get(offset + 5)?,
+        explicit: row.get(offset + 9)?,
+        music_video_type: row.get(offset + 10)?,
     })
 }
 
@@ -5895,14 +5960,17 @@ fn upsert_song(transaction: &Transaction<'_>, song: &Song) -> Result<()> {
         .execute(
             "INSERT INTO song(
                  video_id, title, artists_json, duration_ms, thumbnail_url, is_episode,
+                 explicit, music_video_type,
                  created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
              ON CONFLICT(video_id) DO UPDATE SET
                  title = excluded.title,
                  artists_json = excluded.artists_json,
                  duration_ms = excluded.duration_ms,
                  thumbnail_url = excluded.thumbnail_url,
                  is_episode = excluded.is_episode,
+                 explicit = excluded.explicit,
+                 music_video_type = excluded.music_video_type,
                  updated_at_ms = excluded.updated_at_ms",
             params![
                 song.video_id,
@@ -5911,6 +5979,8 @@ fn upsert_song(transaction: &Transaction<'_>, song: &Song) -> Result<()> {
                 song.duration.map(duration_to_i64_ms).transpose()?,
                 song.thumbnail_url,
                 song.is_episode,
+                song.explicit,
+                song.music_video_type,
                 timestamp,
             ],
         )
@@ -5985,12 +6055,16 @@ mod tests {
             thumbnail_url: Some(format!("https://example.invalid/{id}.jpg")),
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         }
     }
 
     fn episode(id: &str) -> Song {
         Song {
             is_episode: true,
+            explicit: false,
+            music_video_type: None,
             ..song(id)
         }
     }
@@ -7345,6 +7419,54 @@ mod tests {
     }
 
     #[test]
+    fn content_filter_settings_reload_after_fresh_store_open_and_reject_half_applied_mix() {
+        let path = temporary_database("content-filters");
+        let store = DesktopStore::open(&path).unwrap();
+        let mut saved = AppSettings::for_current_user(512 * 1024 * 1024).unwrap();
+        saved.cache_root = std::env::temp_dir().join("metrolist-content-filter-cache");
+        saved.hide_explicit = true;
+        saved.hide_video_songs = true;
+        saved.hide_youtube_shorts = true;
+        futures::executor::block_on(store.save_settings(saved.clone())).unwrap();
+        let mut flagged = song("explicit-video");
+        flagged.explicit = true;
+        flagged.music_video_type = Some("MUSIC_VIDEO_TYPE_OMV".into());
+        futures::executor::block_on(store.set_favorite(flagged.clone(), true)).unwrap();
+        drop(store);
+
+        let reopened = DesktopStore::open(&path).unwrap();
+        let loaded = futures::executor::block_on(reopened.load_settings())
+            .unwrap()
+            .expect("saved content filters");
+        assert!(loaded.hide_explicit);
+        assert!(loaded.hide_video_songs);
+        assert!(loaded.hide_youtube_shorts);
+        assert_eq!(loaded.content_filters(), saved.content_filters());
+        let favorites = futures::executor::block_on(reopened.favorites(10)).unwrap();
+        assert_eq!(favorites.len(), 1);
+        assert!(favorites[0].song.explicit);
+        assert_eq!(
+            favorites[0].song.music_video_type.as_deref(),
+            Some("MUSIC_VIDEO_TYPE_OMV")
+        );
+        assert!(favorites[0].song.is_video_song());
+        assert!(!loaded.content_filters().keep_song(&favorites[0].song));
+
+        let mut invalid = loaded.clone();
+        invalid.hide_explicit = false;
+        invalid.hide_video_songs = false;
+        invalid.hide_youtube_shorts = false;
+        invalid.cache_root = "relative/cache".into();
+        assert!(futures::executor::block_on(reopened.save_settings(invalid)).is_err());
+        assert_eq!(
+            futures::executor::block_on(reopened.load_settings()).unwrap(),
+            Some(saved)
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn settings_round_trip_across_reopen_and_replace_the_singleton() {
         let path = temporary_database("settings");
         let first = AppSettings {
@@ -7357,6 +7479,9 @@ mod tests {
             },
             content_language: "zh-CN".into(),
             content_country: "HK".into(),
+            hide_explicit: true,
+            hide_video_songs: true,
+            hide_youtube_shorts: true,
             audio_quality: AudioQuality::Low,
             audio_normalization: false,
             loudness_level: LoudnessLevel::Quiet,
@@ -7434,6 +7559,9 @@ mod tests {
             proxy: ProxySettings::default(),
             content_language: "en-GB".into(),
             content_country: "GB".into(),
+            hide_explicit: false,
+            hide_video_songs: false,
+            hide_youtube_shorts: false,
             audio_quality: AudioQuality::High,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Loud,
@@ -7574,6 +7702,9 @@ mod tests {
             proxy: ProxySettings::default(),
             content_language: crate::config::SYSTEM_CONTENT_LOCALE.into(),
             content_country: crate::config::SYSTEM_CONTENT_LOCALE.into(),
+            hide_explicit: false,
+            hide_video_songs: false,
+            hide_youtube_shorts: false,
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,

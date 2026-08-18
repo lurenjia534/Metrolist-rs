@@ -30,6 +30,17 @@ pub struct BrowseItem {
     pub thumbnail_url: Option<String>,
     pub params: Option<String>,
     pub editable: bool,
+    pub explicit: bool,
+}
+
+impl BrowseItem {
+    pub fn is_youtube_shorts_playlist(&self) -> bool {
+        let id = self
+            .browse_id
+            .strip_prefix("VL")
+            .unwrap_or(self.browse_id.as_str());
+        id.starts_with("SS")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

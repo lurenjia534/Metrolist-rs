@@ -1227,6 +1227,48 @@ impl EqualizerSettings {
             .find(|preset| self.gains_mb == preset.gains_mb())
     }
 
+    /// Dropdown key shown for a draft that is not a named graphic preset.
+    pub const CUSTOM_PRESET_LABEL: &'static str = "Custom";
+
+    /// Options for the Settings EQ preset dropdown, including Custom.
+    pub fn preset_dropdown_options() -> Vec<(&'static str, &'static str)> {
+        std::iter::once((Self::CUSTOM_PRESET_LABEL, Self::CUSTOM_PRESET_LABEL))
+            .chain(
+                EqualizerPreset::ALL
+                    .into_iter()
+                    .map(|preset| (preset.label(), preset.label())),
+            )
+            .collect()
+    }
+
+    /// Current dropdown value. Custom when bands or an imported profile do not
+    /// match a named preset — never report Flat for that case.
+    pub fn preset_dropdown_value(&self) -> &'static str {
+        self.preset()
+            .map(EqualizerPreset::label)
+            .unwrap_or(Self::CUSTOM_PRESET_LABEL)
+    }
+
+    /// Apply a preset dropdown choice. Custom is a no-op. Flat is ignored when
+    /// the draft is already Custom so a mis-clicked Flat label cannot wipe
+    /// edited bands or an imported profile.
+    pub fn apply_preset_dropdown_value(&mut self, value: &str) -> bool {
+        if value == Self::CUSTOM_PRESET_LABEL {
+            return false;
+        }
+        let Some(preset) = EqualizerPreset::ALL
+            .into_iter()
+            .find(|candidate| candidate.label() == value)
+        else {
+            return false;
+        };
+        if preset == EqualizerPreset::Flat && self.preset().is_none() {
+            return false;
+        }
+        *self = Self::from_preset(preset);
+        true
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self
             .gains_mb
@@ -1555,6 +1597,9 @@ pub struct AppSettings {
     pub proxy: ProxySettings,
     pub content_language: String,
     pub content_country: String,
+    pub hide_explicit: bool,
+    pub hide_video_songs: bool,
+    pub hide_youtube_shorts: bool,
     pub audio_quality: AudioQuality,
     pub audio_normalization: bool,
     pub loudness_level: LoudnessLevel,
@@ -1608,6 +1653,9 @@ impl AppSettings {
             proxy: ProxySettings::default(),
             content_language: SYSTEM_CONTENT_LOCALE.into(),
             content_country: SYSTEM_CONTENT_LOCALE.into(),
+            hide_explicit: false,
+            hide_video_songs: false,
+            hide_youtube_shorts: false,
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,
@@ -1744,6 +1792,14 @@ impl AppSettings {
     pub fn thumbnail_cache_root(&self) -> PathBuf {
         self.cache_root.join("thumbnails")
     }
+
+    pub fn content_filters(&self) -> crate::domain::ContentFilters {
+        crate::domain::ContentFilters {
+            hide_explicit: self.hide_explicit,
+            hide_video_songs: self.hide_video_songs,
+            hide_youtube_shorts: self.hide_youtube_shorts,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1785,6 +1841,59 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eq_preset_dropdown_keeps_custom_gains_off_flat() {
+        let mut custom = EqualizerSettings::from_preset(EqualizerPreset::Bass);
+        custom.gains_mb[0] = custom.gains_mb[0].saturating_add(100);
+        assert_eq!(
+            custom.preset_dropdown_value(),
+            EqualizerSettings::CUSTOM_PRESET_LABEL
+        );
+        assert!(custom.preset().is_none());
+        let before = custom.clone();
+        assert!(!custom.apply_preset_dropdown_value("Flat"));
+        assert_eq!(custom, before);
+        assert!(!custom.apply_preset_dropdown_value(EqualizerSettings::CUSTOM_PRESET_LABEL));
+        assert_eq!(custom, before);
+
+        assert!(custom.apply_preset_dropdown_value("Vocal"));
+        assert_eq!(custom.preset(), Some(EqualizerPreset::Vocal));
+        assert_eq!(custom.preset_dropdown_value(), "Vocal");
+
+        let mut named = EqualizerSettings::from_preset(EqualizerPreset::Bass);
+        assert!(named.apply_preset_dropdown_value("Flat"));
+        assert_eq!(named.preset(), Some(EqualizerPreset::Flat));
+        assert!(!named.enabled);
+
+        let mut imported = EqualizerSettings::from_preset(EqualizerPreset::Flat);
+        imported.active_profile = Some(EqualizerProfile {
+            id: "imported".into(),
+            name: "imported".into(),
+            device_model: "HD 600".into(),
+            equalizer: ParametricEqualizer {
+                preamp_mb: 0,
+                bands: Vec::new(),
+            },
+            source: "oratory1990".into(),
+            rig: "GRAS".into(),
+            is_custom: false,
+            added_at_ms: 1,
+        });
+        assert_eq!(
+            imported.preset_dropdown_value(),
+            EqualizerSettings::CUSTOM_PRESET_LABEL
+        );
+        assert!(!imported.apply_preset_dropdown_value("Flat"));
+        assert!(imported.active_profile.is_some());
+
+        let keys: Vec<_> = EqualizerSettings::preset_dropdown_options()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(keys[0], EqualizerSettings::CUSTOM_PRESET_LABEL);
+        assert!(keys.contains(&"Bass"));
+    }
 
     #[test]
     fn default_window_size_is_valid() {
@@ -1855,6 +1964,9 @@ mod tests {
             proxy: ProxySettings::default(),
             content_language: SYSTEM_CONTENT_LOCALE.into(),
             content_country: SYSTEM_CONTENT_LOCALE.into(),
+            hide_explicit: false,
+            hide_video_songs: false,
+            hide_youtube_shorts: false,
             audio_quality: AudioQuality::Auto,
             audio_normalization: true,
             loudness_level: LoudnessLevel::Balanced,

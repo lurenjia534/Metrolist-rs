@@ -148,6 +148,8 @@ impl ListenTogetherTrack {
             thumbnail_url: self.thumbnail.clone(),
             album: None,
             is_episode: self.is_episode,
+            explicit: false,
+            music_video_type: None,
         }
     }
 

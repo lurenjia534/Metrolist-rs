@@ -491,6 +491,8 @@ mod tests {
             thumbnail_url: Some("https://example.test/cover.jpg".into()),
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         }
     }
 

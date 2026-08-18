@@ -668,6 +668,7 @@ impl InnerTubeClient {
             subtitle: "YouTube Music".into(),
             thumbnail_url: None,
             editable: false,
+            explicit: false,
         };
         let response = self.fetch_browse_page(browse_id, None).await?;
         parse_browse_response(response, requested)
@@ -703,6 +704,7 @@ impl InnerTubeClient {
             subtitle: "YouTube Music".into(),
             thumbnail_url: None,
             editable: false,
+            explicit: false,
         };
         let response = self.fetch_browse_page(browse_id, None).await?;
         let page = parse_browse_tab_response(response, requested, tab_index)?;
@@ -731,6 +733,7 @@ impl InnerTubeClient {
             subtitle: "YouTube Music".into(),
             thumbnail_url: None,
             editable: false,
+            explicit: false,
         };
         let page = self.browse(&item).await?;
         self.complete_browse_page(page).await
@@ -771,6 +774,7 @@ impl InnerTubeClient {
             subtitle: "YouTube Music".into(),
             thumbnail_url: None,
             editable: false,
+            explicit: false,
         };
         let response = self.fetch_browse_page("VLSE", None).await?;
         let mut page = parse_browse_response(response, requested)?;
@@ -2980,6 +2984,7 @@ fn artist_section_link(title: String, browse: &Value) -> Option<BrowseItem> {
             .filter(|params| !params.is_empty())
             .map(str::to_owned),
         editable: false,
+        explicit: false,
     })
 }
 
@@ -3091,6 +3096,7 @@ pub fn parse_browse_response(json: impl AsRef<[u8]>, requested: BrowseItem) -> R
                 thumbnail_url: None,
                 params: None,
                 editable: false,
+                explicit: false,
             });
         }
     }
@@ -3554,6 +3560,8 @@ fn parse_playlist_panel_song(renderer: &Value) -> Option<Song> {
         thumbnail_url,
         album,
         is_episode: is_episode_renderer(renderer),
+        explicit: renderer_is_explicit(renderer),
+        music_video_type: renderer_music_video_type(renderer),
     })
 }
 
@@ -3687,6 +3695,7 @@ pub fn parse_explore_response(json: impl AsRef<[u8]>) -> Result<ExplorePage> {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     editable: false,
+                    explicit: false,
                 });
                 for content in contents {
                     let Some(renderer) = content.get("musicTwoRowItemRenderer") else {
@@ -3849,6 +3858,8 @@ fn parse_compact_home_song(renderer: &Value) -> Option<Song> {
         thumbnail_url,
         album,
         is_episode: true,
+        explicit: renderer_is_explicit(renderer),
+        music_video_type: renderer_music_video_type(renderer),
     })
 }
 
@@ -3889,6 +3900,7 @@ fn browse_item_from_endpoint(browse: &Value, title: &str) -> Option<BrowseItem> 
             .and_then(Value::as_str)
             .map(str::to_owned),
         editable: false,
+        explicit: false,
     })
 }
 
@@ -3975,6 +3987,8 @@ fn parse_song(renderer: &Value, fallback_artists: &[ArtistCredit]) -> Option<Son
         thumbnail_url,
         album,
         is_episode: is_episode_renderer(renderer),
+        explicit: renderer_is_explicit(renderer),
+        music_video_type: renderer_music_video_type(renderer),
     })
 }
 
@@ -4114,7 +4128,76 @@ fn parse_browse_item(renderer: &Value) -> Option<BrowseItem> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         editable: renderer_has_edit_action(renderer),
+        explicit: renderer_is_explicit(renderer),
     })
+}
+
+fn renderer_is_explicit(renderer: &Value) -> bool {
+    ["badges", "subtitleBadges"].iter().any(|key| {
+        renderer
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|badges| badges.iter().any(badge_is_explicit))
+    })
+}
+
+fn badge_is_explicit(badge: &Value) -> bool {
+    value_at(badge, &["musicInlineBadgeRenderer", "icon", "iconType"]).and_then(Value::as_str)
+        == Some("MUSIC_EXPLICIT_BADGE")
+}
+
+fn renderer_music_video_type(renderer: &Value) -> Option<String> {
+    [
+        &[
+            "overlay",
+            "musicItemThumbnailOverlayRenderer",
+            "content",
+            "musicPlayButtonRenderer",
+            "playNavigationEndpoint",
+        ][..],
+        &[
+            "thumbnailOverlay",
+            "musicItemThumbnailOverlayRenderer",
+            "content",
+            "musicPlayButtonRenderer",
+            "playNavigationEndpoint",
+        ][..],
+    ]
+    .into_iter()
+    .find_map(|path| value_at(renderer, path).and_then(endpoint_music_video_type))
+    .or_else(|| {
+        renderer
+            .get("navigationEndpoint")
+            .and_then(endpoint_music_video_type)
+    })
+    .or_else(|| renderer.get("onTap").and_then(endpoint_music_video_type))
+}
+
+fn endpoint_music_video_type(endpoint: &Value) -> Option<String> {
+    value_at(
+        endpoint,
+        &[
+            "watchEndpoint",
+            "watchEndpointMusicSupportedConfigs",
+            "watchEndpointMusicConfig",
+            "musicVideoType",
+        ],
+    )
+    .or_else(|| {
+        value_at(
+            endpoint,
+            &[
+                "watchPlaylistEndpoint",
+                "watchEndpointMusicSupportedConfigs",
+                "watchEndpointMusicConfig",
+                "musicVideoType",
+            ],
+        )
+    })
+    .and_then(Value::as_str)
+    .map(str::trim)
+    .filter(|kind| !kind.is_empty())
+    .map(str::to_owned)
 }
 
 fn renderer_has_edit_action(renderer: &Value) -> bool {
@@ -4583,6 +4666,10 @@ mod tests {
     const EXPLORE_FIXTURE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/innertube/explore.json"
+    ));
+    const CONTENT_FILTERS_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/innertube/content_filters.json"
     ));
 
     struct FlakyRadioClient {
@@ -5090,7 +5177,117 @@ mod tests {
             thumbnail_url: None,
             params: None,
             editable: false,
+            explicit: false,
         }
+    }
+
+    #[test]
+    fn parse_classify_filter_uses_shipped_innertube_flags() {
+        use crate::domain::ContentFilters;
+
+        let parsed = parse_search_response(CONTENT_FILTERS_FIXTURE).unwrap();
+        let by_id = |id: &str| {
+            parsed
+                .songs
+                .iter()
+                .find(|song| song.video_id == id)
+                .unwrap_or_else(|| panic!("missing parsed song {id}"))
+        };
+        let browse = |id: &str| {
+            parsed
+                .items
+                .iter()
+                .find(|item| item.browse_id == id)
+                .unwrap_or_else(|| panic!("missing parsed browse item {id}"))
+        };
+
+        let plain = by_id("plain-song");
+        assert!(!plain.explicit);
+        assert!(plain.music_video_type.is_none());
+        assert!(!plain.is_video_song());
+
+        let atv = by_id("atv-song");
+        assert_eq!(
+            atv.music_video_type.as_deref(),
+            Some("MUSIC_VIDEO_TYPE_ATV")
+        );
+        assert!(!atv.is_video_song());
+
+        let omv = by_id("omv-song");
+        assert_eq!(
+            omv.music_video_type.as_deref(),
+            Some("MUSIC_VIDEO_TYPE_OMV")
+        );
+        assert!(omv.is_video_song());
+
+        assert!(by_id("explicit-song").explicit);
+        assert!(browse("MPRE-explicit-album").explicit);
+        assert!(!browse("VLPL-regular").is_youtube_shorts_playlist());
+        assert!(browse("VLSS-shorts-one").is_youtube_shorts_playlist());
+
+        let all_off = ContentFilters::default();
+        assert_eq!(all_off.songs(parsed.songs.clone()), parsed.songs);
+        assert_eq!(all_off.browse_items(parsed.items.clone()), parsed.items);
+
+        let hide_videos = ContentFilters {
+            hide_video_songs: true,
+            ..ContentFilters::default()
+        };
+        let visible_videos = hide_videos.songs(parsed.songs.clone());
+        assert!(
+            visible_videos
+                .iter()
+                .any(|song| song.video_id == "atv-song")
+        );
+        assert!(
+            visible_videos
+                .iter()
+                .any(|song| song.video_id == "plain-song")
+        );
+        assert!(
+            !visible_videos
+                .iter()
+                .any(|song| song.video_id == "omv-song")
+        );
+
+        let hide_explicit = ContentFilters {
+            hide_explicit: true,
+            ..ContentFilters::default()
+        };
+        assert!(
+            !hide_explicit
+                .songs(parsed.songs.clone())
+                .iter()
+                .any(|song| song.video_id == "explicit-song")
+        );
+        assert!(
+            hide_explicit
+                .songs(parsed.songs.clone())
+                .iter()
+                .any(|song| song.video_id == "plain-song")
+        );
+        assert!(
+            !hide_explicit
+                .browse_items(parsed.items.clone())
+                .iter()
+                .any(|item| item.browse_id == "MPRE-explicit-album")
+        );
+
+        let hide_shorts = ContentFilters {
+            hide_youtube_shorts: true,
+            ..ContentFilters::default()
+        };
+        let visible_items = hide_shorts.browse_items(parsed.items.clone());
+        assert!(
+            visible_items
+                .iter()
+                .any(|item| item.browse_id == "VLPL-regular")
+        );
+        assert!(
+            !visible_items
+                .iter()
+                .any(|item| item.browse_id == "VLSS-shorts-one")
+        );
     }
 
     #[test]

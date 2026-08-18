@@ -88,6 +88,7 @@ impl ExploreCategory {
             thumbnail_url: None,
             params: self.params.clone(),
             editable: false,
+            explicit: false,
         }
     }
 }
@@ -113,6 +114,8 @@ mod tests {
             thumbnail_url: None,
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         })
     }
 
