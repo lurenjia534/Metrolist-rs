@@ -5,14 +5,13 @@ use gpui_component::{
     Theme, ThemeMode, TitleBar, VirtualListScrollHandle, WindowExt,
     alert::Alert,
     avatar::Avatar,
-    button::{Button, ButtonVariant, ButtonVariants},
+    button::{Button, ButtonGroup, ButtonVariant, ButtonVariants},
     clipboard::Clipboard,
     description_list::{DescriptionItem, DescriptionList},
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariant, GroupBoxVariants},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
-    link::Link,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
@@ -25069,94 +25068,241 @@ impl MetrolistShell {
         let no_song = self.current_song.is_none();
         let custom_minutes = self.sleep_timer_minutes;
         let active = self.sleep_timer.is_some();
-        Button::new(id)
-            .ghost()
-            .compact()
-            .icon(IconName::Moon)
-            .label(self.sleep_timer_button_label())
-            .tooltip(self.sleep_timer.map_or_else(
-                || "Sleep timer".into(),
-                |timer| timer.summary(Instant::now()),
-            ))
-            .selected(active)
-            .disabled(host_controlled)
-            .dropdown_menu(move |menu, _, _| {
-                let start_in = |minutes: u64| {
-                    let view = view.clone();
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        view.update(cx, |this, cx| {
-                            this.start_sleep_timer_minutes(minutes, cx);
-                        });
-                    }
-                };
-                menu.item(
-                    PopupMenuItem::new("15 minutes")
-                        .disabled(no_song)
-                        .on_click(start_in(15)),
-                )
-                .item(
-                    PopupMenuItem::new("30 minutes")
-                        .disabled(no_song)
-                        .on_click(start_in(30)),
-                )
-                .item(
-                    PopupMenuItem::new("60 minutes")
-                        .disabled(no_song)
-                        .on_click(start_in(60)),
-                )
-                .item({
-                    let view = view.clone();
-                    PopupMenuItem::new("End of song")
-                        .disabled(no_song)
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| {
-                                this.start_end_of_song_sleep_timer(cx);
-                            });
-                        })
-                })
-                .separator()
-                .item({
-                    let view = view.clone();
-                    PopupMenuItem::new("Custom −5 min")
-                        .disabled(custom_minutes <= MIN_SLEEP_TIMER_MINUTES)
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| {
-                                this.adjust_sleep_timer_minutes(-5, cx);
-                            });
-                        })
-                })
-                .item({
-                    let view = view.clone();
-                    PopupMenuItem::new("Custom +5 min")
-                        .disabled(custom_minutes >= MAX_SLEEP_TIMER_MINUTES)
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| {
-                                this.adjust_sleep_timer_minutes(5, cx);
-                            });
-                        })
-                })
-                .item({
-                    let view = view.clone();
-                    PopupMenuItem::new(format!("Start custom ({custom_minutes} min)"))
-                        .disabled(no_song)
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| {
-                                this.start_custom_sleep_timer(cx);
-                            });
-                        })
-                })
-                .when(active, |menu| {
-                    let view = view.clone();
-                    menu.separator()
-                        .item(
-                            PopupMenuItem::new("Cancel timer").on_click(move |_, _, cx| {
+        let remaining = self.sleep_timer_button_label();
+        h_flex()
+            .items_center()
+            .gap_1()
+            .child(
+                Button::new(id)
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Moon)
+                    .label("Timer")
+                    .tooltip(self.sleep_timer.map_or_else(
+                        || "Sleep timer".into(),
+                        |timer| timer.summary(Instant::now()),
+                    ))
+                    .selected(active)
+                    .disabled(host_controlled)
+                    .dropdown_menu(move |menu, _, _| {
+                        let start_in = |minutes: u64| {
+                            let view = view.clone();
+                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                 view.update(cx, |this, cx| {
-                                    this.cancel_sleep_timer(cx);
+                                    this.start_sleep_timer_minutes(minutes, cx);
                                 });
-                            }),
+                            }
+                        };
+                        menu.item(
+                            PopupMenuItem::new("15 minutes")
+                                .disabled(no_song)
+                                .on_click(start_in(15)),
                         )
-                })
+                        .item(
+                            PopupMenuItem::new("30 minutes")
+                                .disabled(no_song)
+                                .on_click(start_in(30)),
+                        )
+                        .item(
+                            PopupMenuItem::new("60 minutes")
+                                .disabled(no_song)
+                                .on_click(start_in(60)),
+                        )
+                        .item({
+                            let view = view.clone();
+                            PopupMenuItem::new("End of song")
+                                .disabled(no_song)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.start_end_of_song_sleep_timer(cx);
+                                    });
+                                })
+                        })
+                        .separator()
+                        .item({
+                            let view = view.clone();
+                            PopupMenuItem::new("Custom −5 min")
+                                .disabled(custom_minutes <= MIN_SLEEP_TIMER_MINUTES)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.adjust_sleep_timer_minutes(-5, cx);
+                                    });
+                                })
+                        })
+                        .item({
+                            let view = view.clone();
+                            PopupMenuItem::new("Custom +5 min")
+                                .disabled(custom_minutes >= MAX_SLEEP_TIMER_MINUTES)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.adjust_sleep_timer_minutes(5, cx);
+                                    });
+                                })
+                        })
+                        .item({
+                            let view = view.clone();
+                            PopupMenuItem::new(format!("Start custom ({custom_minutes} min)"))
+                                .disabled(no_song)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.start_custom_sleep_timer(cx);
+                                    });
+                                })
+                        })
+                        .when(active, |menu| {
+                            let view = view.clone();
+                            menu.separator()
+                                .item(PopupMenuItem::new("Cancel timer").on_click(
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.cancel_sleep_timer(cx);
+                                        });
+                                    },
+                                ))
+                        })
+                    }),
+            )
+            .when(active, |row| {
+                row.child(Tag::info().small().rounded_full().child(remaining))
             })
+    }
+
+    fn player_side_panel(cx: &App) -> Div {
+        v_flex()
+            .h_full()
+            .w(px(360.))
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(cx.theme().sidebar_border)
+            .bg(cx.theme().sidebar)
+    }
+
+    fn player_panel_header(
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        cx: &App,
+    ) -> Div {
+        h_flex()
+            .h(px(64.))
+            .flex_shrink_0()
+            .px_4()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .border_b_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().font_semibold().child(title.into()))
+                    .child(caption_line(subtitle.into(), cx.theme().muted_foreground)),
+            )
+    }
+
+    fn player_empty_state(
+        icon: IconName,
+        title: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        cx: &App,
+    ) -> Div {
+        v_flex()
+            .flex_1()
+            .size_full()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .child(
+                Icon::new(icon)
+                    .size_8()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(div().font_semibold().text_center().child(title.into()))
+            .child(
+                div()
+                    .text_sm()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description.into()),
+            )
+    }
+
+    fn player_time_label(text: impl Into<SharedString>, cx: &App) -> Div {
+        div()
+            .flex_shrink_0()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(text.into())
+    }
+
+    fn render_lyrics_document(
+        &self,
+        scroll_id: &'static str,
+        line_prefix: &'static str,
+        document: &LyricsDocument,
+        host_controlled: bool,
+        show_untimed_note: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .id(scroll_id)
+            .flex_1()
+            .size_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.lyrics_scroll)
+            .vertical_scrollbar(&self.lyrics_scroll)
+            .gap_1()
+            .p_3()
+            .children(document.lines.iter().enumerate().map(|(index, line)| {
+                let is_active = self.lyrics_active_line == Some(index);
+                if let Some(start) = line.start {
+                    Button::new(format!("{line_prefix}-{index}"))
+                        .ghost()
+                        .w_full()
+                        .justify_start()
+                        .label(line.text.clone())
+                        .tooltip(format!("Seek to {}", format_duration(start)))
+                        .selected(is_active)
+                        .disabled(host_controlled)
+                        .when(is_active, |button| button.font_semibold())
+                        .when(!is_active, |button| {
+                            button.text_color(cx.theme().muted_foreground)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.seek_from_desktop(start, cx);
+                        }))
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .rounded(cx.theme().radius)
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .when(is_active, |row| {
+                            row.font_semibold().text_color(cx.theme().primary)
+                        })
+                        .when(!is_active, |row| {
+                            row.text_color(cx.theme().muted_foreground)
+                        })
+                        .child(line.text.clone())
+                        .into_any_element()
+                }
+            }))
+            .when(show_untimed_note && !document.is_synced(), |list| {
+                list.child(
+                    div()
+                        .mt_3()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("This provider returned untimed lyrics."),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_virtual_queue_list(
@@ -25170,15 +25316,13 @@ impl MetrolistShell {
         let queue_len = self.queue.len();
         let visible_len = queue_len.saturating_sub(start);
         if visible_len == 0 {
-            return v_flex()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("The queue is empty")
-                .into_any_element();
+            return Self::player_empty_state(
+                IconName::PanelRight,
+                "The queue is empty",
+                "Play a song or add tracks to build the next set.",
+                cx,
+            )
+            .into_any_element();
         }
 
         let item_sizes = Rc::new(vec![size(px(0.), QUEUE_ROW_HEIGHT); visible_len]);
@@ -25240,63 +25384,75 @@ impl MetrolistShell {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                Button::new(format!("{id_prefix}-select"))
-                    .ghost()
-                    .compact()
-                    .label(if self.queue_selection_mode {
-                        "Selecting"
-                    } else {
-                        "Select"
-                    })
-                    .selected(self.queue_selection_mode)
-                    .disabled(host_controlled || self.queue.is_empty())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_queue_selection_mode(cx);
-                    })),
-            )
+            .border_color(if self.queue_selection_mode {
+                cx.theme().accent
+            } else {
+                cx.theme().border
+            })
+            .when(self.queue_selection_mode, |row| {
+                row.bg(cx.theme().accent.opacity(0.12))
+            })
             .when(!self.queue_selection_mode, |row| {
                 row.child(
-                    icon_ghost_button(
-                        format!("{id_prefix}-shuffle"),
-                        IconName::ChevronsUpDown,
-                        if self.shuffle_enabled {
-                            "Shuffle on"
-                        } else {
-                            "Shuffle off"
-                        },
-                    )
-                    .selected(self.shuffle_enabled)
-                    .disabled(host_controlled || self.queue.is_empty())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
-                )
-                .child(
-                    icon_ghost_button(
-                        format!("{id_prefix}-repeat"),
-                        IconName::Redo2,
-                        self.repeat_mode.label(),
-                    )
-                    .selected(self.repeat_mode != RepeatMode::Off)
-                    .disabled(host_controlled || self.queue.is_empty())
-                    .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-clear-upcoming"))
-                        .ghost()
+                    ButtonGroup::new(format!("{id_prefix}-toolbar-group"))
                         .compact()
-                        .icon(IconName::Delete)
-                        .label("Clear")
-                        .tooltip("Keep the current song and remove everything after it")
-                        .disabled(host_controlled || self.queue.remaining_after_current() == 0)
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx))),
+                        .outline()
+                        .child(
+                            Button::new(format!("{id_prefix}-select"))
+                                .ghost()
+                                .compact()
+                                .label("Select")
+                                .selected(self.queue_selection_mode)
+                                .disabled(host_controlled || self.queue.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_queue_selection_mode(cx);
+                                })),
+                        )
+                        .child(
+                            icon_ghost_button(
+                                format!("{id_prefix}-shuffle"),
+                                IconName::ChevronsUpDown,
+                                if self.shuffle_enabled {
+                                    "Shuffle on"
+                                } else {
+                                    "Shuffle off"
+                                },
+                            )
+                            .selected(self.shuffle_enabled)
+                            .disabled(host_controlled || self.queue.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
+                        )
+                        .child(
+                            icon_ghost_button(
+                                format!("{id_prefix}-repeat"),
+                                IconName::Redo2,
+                                self.repeat_mode.label(),
+                            )
+                            .selected(self.repeat_mode != RepeatMode::Off)
+                            .disabled(host_controlled || self.queue.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat_mode(cx))),
+                        )
+                        .child(
+                            Button::new(format!("{id_prefix}-clear-upcoming"))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Delete)
+                                .label("Clear")
+                                .tooltip("Keep the current song and remove everything after it")
+                                .disabled(
+                                    host_controlled || self.queue.remaining_after_current() == 0,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.clear_upcoming_queue(cx)),
+                                ),
+                        ),
                 )
             })
             .when(self.queue_selection_mode, |row| {
                 row.child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
+                    Tag::primary()
+                        .small()
+                        .rounded_full()
                         .child(format!("{selection_count} selected")),
                 )
                 .child(
@@ -25323,59 +25479,63 @@ impl MetrolistShell {
                         })),
                 )
                 .child(
-                    Button::new(format!("{id_prefix}-selection-play"))
-                        .ghost()
+                    ButtonGroup::new(format!("{id_prefix}-selection-group"))
                         .compact()
-                        .icon(IconName::Play)
-                        .label("Play")
-                        .disabled(host_controlled || selection_count == 0)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.play_selected_queue(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-selection-shuffle"))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::ChevronsUpDown)
-                        .label("Shuffle")
-                        .disabled(host_controlled || selection_count == 0)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.shuffle_selected_queue(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-selection-queue"))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::Plus)
-                        .label("Add to queue")
-                        .disabled(host_controlled || selection_count == 0)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.add_selected_queue(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-selection-playlist"))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::Plus)
-                        .label("Add to local playlist")
-                        .disabled(host_controlled || selection_count == 0)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.add_selected_queue_to_local_playlist(cx);
-                        })),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-selection-download"))
-                        .ghost()
-                        .compact()
-                        .icon(IconName::HardDrive)
-                        .label("Download")
-                        .disabled(host_controlled || selection_count == 0)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.download_selected_queue(cx);
-                        })),
+                        .child(
+                            Button::new(format!("{id_prefix}-selection-play"))
+                                .primary()
+                                .compact()
+                                .icon(IconName::Play)
+                                .label("Play")
+                                .disabled(host_controlled || selection_count == 0)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.play_selected_queue(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{id_prefix}-selection-shuffle"))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::ChevronsUpDown)
+                                .label("Shuffle")
+                                .disabled(host_controlled || selection_count == 0)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.shuffle_selected_queue(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{id_prefix}-selection-queue"))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Plus)
+                                .label("Add to queue")
+                                .disabled(host_controlled || selection_count == 0)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_selected_queue(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{id_prefix}-selection-playlist"))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Plus)
+                                .label("Add to local playlist")
+                                .disabled(host_controlled || selection_count == 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.add_selected_queue_to_local_playlist(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{id_prefix}-selection-download"))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::HardDrive)
+                                .label("Download")
+                                .disabled(host_controlled || selection_count == 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.download_selected_queue(cx);
+                                })),
+                        ),
                 )
                 .child(
                     Button::new(format!("{id_prefix}-selection-remove"))
@@ -25668,7 +25828,8 @@ impl MetrolistShell {
             });
 
         list_row_shell(SharedString::from(format!("queue-item-{index}")), cx)
-            .when(is_current, |row| row.bg(cx.theme().secondary))
+            .when(is_current, |row| row.bg(cx.theme().accent.opacity(0.16)))
+            .when(selected && !is_current, |row| row.bg(cx.theme().secondary))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if !host_controlled {
                     if this.queue_selection_mode {
@@ -25687,12 +25848,15 @@ impl MetrolistShell {
                     .justify_center()
                     .text_xs()
                     .text_color(if is_current {
-                        cx.theme().primary
+                        cx.theme().accent_foreground
                     } else {
                         cx.theme().muted_foreground
                     })
                     .child(if is_current {
-                        Icon::new(IconName::Play).size_4().into_any_element()
+                        Icon::new(IconName::Play)
+                            .size_4()
+                            .text_color(cx.theme().primary)
+                            .into_any_element()
                     } else {
                         div().child((index + 1).to_string()).into_any_element()
                     }),
@@ -25703,19 +25867,23 @@ impl MetrolistShell {
                 IconName::Play,
                 cx,
             ))
-            .child(media_text_block(
-                item.song.title.clone(),
-                item.song.artist_line(),
-                None,
-                cx,
-            ))
             .child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(duration),
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(media_text_block(
+                        item.song.title.clone(),
+                        item.song.artist_line(),
+                        None,
+                        cx,
+                    ))
+                    .when(is_current, |row| {
+                        row.child(Tag::primary().small().rounded_full().child("Playing"))
+                    }),
             )
+            .child(Self::player_time_label(duration, cx))
             .when(self.queue_selection_mode, |row| {
                 row.child(
                     Button::new(format!("queue-select-{index}"))
@@ -25844,86 +26012,92 @@ impl MetrolistShell {
         } else {
             cx.theme().muted_foreground
         };
+        let radio_tag = if radio_failed {
+            Tag::danger().small().rounded_full().child("Failed")
+        } else if radio_loading {
+            Tag::info().small().rounded_full().child("Loading")
+        } else if matches!(
+            self.radio_state,
+            RadioQueueState::Active(_) | RadioQueueState::Exhausted(_)
+        ) {
+            Tag::success().small().rounded_full().child("Radio")
+        } else {
+            Tag::secondary().small().rounded_full().child("Idle")
+        };
 
-        v_flex()
-            .h_full()
-            .w(px(360.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(64.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex().child(div().font_semibold().child("Queue")).child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{queue_len} songs")),
-                        ),
-                    )
-                    .child(
-                        Button::new("close-queue")
-                            .ghost()
-                            .compact()
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.queue_visible = false;
-                                this.clear_queue_selection();
-                                cx.notify();
-                            })),
-                    ),
+                Self::player_panel_header("Queue", format!("{queue_len} songs"), cx).child(
+                    Button::new("close-queue")
+                        .ghost()
+                        .compact()
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.queue_visible = false;
+                            this.clear_queue_selection();
+                            cx.notify();
+                        })),
+                ),
             )
             .child(self.render_queue_toolbar("queue", host_controlled, cx))
             .child(
-                GroupBox::new().fill().flex_shrink_0().mx_3().mt_2().child(
-                    h_flex()
-                        .w_full()
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(title_line(radio_title).text_sm())
-                                .child(caption_line(radio_detail, radio_detail_color)),
-                        )
-                        .child(
-                            Button::new("queue-start-radio")
-                                .ghost()
-                                .compact()
-                                .label(if radio_loading {
-                                    "Loading…"
-                                } else {
-                                    "Start radio"
-                                })
-                                .disabled(
-                                    host_controlled || self.current_song.is_none() || radio_loading,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_radio_from_current(window, cx);
-                                })),
-                        )
-                        .when(radio_failed, |row| {
-                            row.child(
-                                Button::new("queue-retry-radio")
+                GroupBox::new()
+                    .outline()
+                    .flex_shrink_0()
+                    .mx_3()
+                    .mt_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(title_line(radio_title).text_sm())
+                                            .child(radio_tag),
+                                    )
+                                    .child(caption_line(radio_detail, radio_detail_color)),
+                            )
+                            .child(
+                                Button::new("queue-start-radio")
                                     .ghost()
                                     .compact()
-                                    .label("Retry")
-                                    .disabled(host_controlled)
+                                    .label(if radio_loading {
+                                        "Loading…"
+                                    } else {
+                                        "Start radio"
+                                    })
+                                    .disabled(
+                                        host_controlled
+                                            || self.current_song.is_none()
+                                            || radio_loading,
+                                    )
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.retry_radio(window, cx);
+                                        this.start_radio_from_current(window, cx);
                                     })),
                             )
-                        }),
-                ),
+                            .when(radio_failed, |row| {
+                                row.child(
+                                    Button::new("queue-retry-radio")
+                                        .ghost()
+                                        .compact()
+                                        .label("Retry")
+                                        .disabled(host_controlled)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.retry_radio(window, cx);
+                                        })),
+                                )
+                            }),
+                    ),
             )
             .child(self.render_virtual_queue_list("queue-panel", 0, cx))
             .into_any_element()
@@ -25939,45 +26113,27 @@ impl MetrolistShell {
         let in_room = self.listen_together_snapshot.room.is_some();
         let unavailable = busy || in_room || self.current_song.is_none();
 
-        v_flex()
-            .h_full()
-            .w(px(320.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(div().font_semibold().child("Speed & pitch"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if busy {
-                                        "Rebuilding the audio chain…"
-                                    } else {
-                                        "Changes apply and save immediately"
-                                    }),
-                            ),
-                    )
-                    .child(
-                        Button::new("close-playback-parameters")
-                            .ghost()
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.playback_parameters_visible = false;
-                                cx.notify();
-                            })),
-                    ),
+                Self::player_panel_header(
+                    "Speed & pitch",
+                    if busy {
+                        "Rebuilding the audio chain…"
+                    } else {
+                        "Changes apply and save immediately"
+                    },
+                    cx,
+                )
+                .child(
+                    Button::new("close-playback-parameters")
+                        .ghost()
+                        .compact()
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.playback_parameters_visible = false;
+                            cx.notify();
+                        })),
+                ),
             )
             .child(
                 v_flex()
@@ -25988,47 +26144,31 @@ impl MetrolistShell {
                     .p_4()
                     .when(in_room, |content| {
                         content.child(
-                            div()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().warning.opacity(0.12))
-                                .text_color(cx.theme().warning)
-                                .p_3()
-                                .text_sm()
-                                .child("Speed and pitch are locked while connected to a Listen Together room because these parameters are not synchronized by the room protocol."),
+                            Alert::warning(
+                                "live-playback-room-lock",
+                                "Speed and pitch are locked while connected to a Listen Together room because these parameters are not synchronized by the room protocol.",
+                            )
+                            .small()
+                            .title("Listen Together"),
                         )
                     })
                     .when_some(self.playback_parameters_error.clone(), |content, error| {
-                        content.child(
-                            div()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().danger.opacity(0.12))
-                                .text_color(cx.theme().danger)
-                                .p_3()
-                                .text_sm()
-                                .child(error),
-                        )
+                        content.child(Alert::error("live-playback-error", error).small())
                     })
                     .when_some(
                         self.playback_parameters_notice.clone(),
                         |content, notice| {
-                            content.child(
-                                div()
-                                    .rounded(cx.theme().radius)
-                                    .bg(cx.theme().success.opacity(0.12))
-                                    .text_color(cx.theme().success)
-                                    .p_3()
-                                    .text_sm()
-                                    .child(notice),
-                            )
+                            content.child(Alert::success("live-playback-notice", notice).small())
                         },
                     )
                     .child(
-                        v_flex()
-                            .gap_2()
-                            .child(div().text_sm().font_medium().child("Mode"))
+                        GroupBox::new()
+                            .outline()
+                            .title("Mode")
                             .child(
-                                h_flex()
-                                    .gap_2()
+                                ButtonGroup::new("live-playback-mode-group")
+                                    .compact()
+                                    .outline()
                                     .child(
                                         Button::new("live-playback-mode-normal")
                                             .label("Normal")
@@ -26066,9 +26206,9 @@ impl MetrolistShell {
                             ),
                     )
                     .child(
-                        v_flex()
-                            .gap_2()
-                            .child(div().text_sm().font_medium().child("Speed"))
+                        GroupBox::new()
+                            .outline()
+                            .title("Speed")
                             .child(
                                 h_flex()
                                     .gap_3()
@@ -26076,6 +26216,7 @@ impl MetrolistShell {
                                     .child(
                                         Button::new("live-playback-speed-down")
                                             .ghost()
+                                            .compact()
                                             .label("−")
                                             .disabled(
                                                 unavailable
@@ -26094,14 +26235,13 @@ impl MetrolistShell {
                                             .w(px(88.))
                                             .text_center()
                                             .font_semibold()
-                                            .child(format!(
-                                                "{:.2}×",
-                                                parameters.tempo_ratio()
-                                            )),
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .child(format!("{:.2}×", parameters.tempo_ratio())),
                                     )
                                     .child(
                                         Button::new("live-playback-speed-up")
                                             .ghost()
+                                            .compact()
                                             .label("+")
                                             .disabled(
                                                 unavailable
@@ -26125,9 +26265,9 @@ impl MetrolistShell {
                     )
                     .when(!parameters.varispeed, |content| {
                         content.child(
-                            v_flex()
-                                .gap_2()
-                                .child(div().text_sm().font_medium().child("Transpose"))
+                            GroupBox::new()
+                                .outline()
+                                .title("Transpose")
                                 .child(
                                     h_flex()
                                         .gap_3()
@@ -26135,6 +26275,7 @@ impl MetrolistShell {
                                         .child(
                                             Button::new("live-playback-transpose-down")
                                                 .ghost()
+                                                .compact()
                                                 .label("−")
                                                 .disabled(
                                                     unavailable
@@ -26153,6 +26294,7 @@ impl MetrolistShell {
                                                 .w(px(88.))
                                                 .text_center()
                                                 .font_semibold()
+                                                .font_family(cx.theme().mono_font_family.clone())
                                                 .child(format!(
                                                     "{:+} st",
                                                     parameters.transpose_semitones
@@ -26161,6 +26303,7 @@ impl MetrolistShell {
                                         .child(
                                             Button::new("live-playback-transpose-up")
                                                 .ghost()
+                                                .compact()
                                                 .label("+")
                                                 .disabled(
                                                     unavailable
@@ -26180,15 +26323,14 @@ impl MetrolistShell {
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                         .child("−12 to +12 semitones"),
-                    ),
-                )
-            })
-            .child(
+                                ),
+                        )
+                    })
+                    .child(
                         Button::new("live-playback-parameters-reset")
+                            .outline()
                             .label("Reset to 1.00× / 0 st")
-                            .disabled(
-                                unavailable || parameters == PlaybackParameters::default(),
-                            )
+                            .disabled(unavailable || parameters == PlaybackParameters::default())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_playback_parameter_change(
                                     PlaybackParameterChange::Reset,
@@ -26213,162 +26355,79 @@ impl MetrolistShell {
             .as_ref()
             .map_or_else(|| "Nothing playing".to_owned(), |song| song.title.clone());
         let content = match &self.lyrics_state {
-            LyricsViewState::Idle if self.current_song.is_none() => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(div().font_medium().child("Choose a song"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Timed lyrics will appear here."),
-                )
-                .into_any_element(),
-            LyricsViewState::Idle => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    Button::new("load-current-lyrics")
-                        .label("Load lyrics")
-                        .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                )
-                .into_any_element(),
-            LyricsViewState::Loading(_) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::LoaderCircle).size_8())
-                .child("Looking for timed lyrics…")
-                .into_any_element(),
-            LyricsViewState::Unavailable(_) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::BookOpen).size_8())
-                .child(div().font_medium().child("Lyrics unavailable"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No close metadata match was found."),
-                )
-                .child(
-                    Button::new("retry-unavailable-lyrics")
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                )
-                .into_any_element(),
-            LyricsViewState::Failed(_, message) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::TriangleAlert).size_8())
-                .child(div().font_medium().child("Lyrics request failed"))
-                .child(
-                    div()
-                        .max_w(px(300.))
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(message.clone()),
-                )
-                .child(
-                    Button::new("retry-failed-lyrics")
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                )
-                .into_any_element(),
-            LyricsViewState::Loaded(_, document) => {
-                let synced = document.is_synced();
-                v_flex()
-                    .id("lyrics-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.lyrics_scroll)
-                    .vertical_scrollbar(&self.lyrics_scroll)
-                    .gap_1()
-                    .p_3()
-                    .children(document.lines.iter().enumerate().map(|(index, line)| {
-                        if let Some(start) = line.start {
-                            Button::new(format!("lyrics-line-{index}"))
-                                .ghost()
-                                .w_full()
-                                .justify_start()
-                                .label(line.text.clone())
-                                .tooltip(format!("Seek to {}", format_duration(start)))
-                                .selected(self.lyrics_active_line == Some(index))
-                                .disabled(host_controlled)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.seek_from_desktop(start, cx);
-                                }))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .w_full()
-                                .rounded(cx.theme().radius)
-                                .px_3()
-                                .py_2()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(line.text.clone())
-                                .into_any_element()
-                        }
-                    }))
-                    .when(!synced, |list| {
-                        list.child(
-                            div()
-                                .mt_3()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("This provider returned untimed lyrics."),
-                        )
-                    })
-                    .into_any_element()
-            }
+            LyricsViewState::Idle if self.current_song.is_none() => Self::player_empty_state(
+                IconName::BookOpen,
+                "Choose a song",
+                "Timed lyrics will appear here.",
+                cx,
+            )
+            .into_any_element(),
+            LyricsViewState::Idle => Self::player_empty_state(
+                IconName::BookOpen,
+                "Lyrics not loaded",
+                "Load lyrics for the current track.",
+                cx,
+            )
+            .child(
+                Button::new("load-current-lyrics")
+                    .primary()
+                    .label("Load lyrics")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+            )
+            .into_any_element(),
+            LyricsViewState::Loading(_) => Self::player_empty_state(
+                IconName::BookOpen,
+                "Looking for timed lyrics…",
+                "Searching the lyrics provider.",
+                cx,
+            )
+            .child(Spinner::new())
+            .into_any_element(),
+            LyricsViewState::Unavailable(_) => Self::player_empty_state(
+                IconName::BookOpen,
+                "Lyrics unavailable",
+                "No close metadata match was found.",
+                cx,
+            )
+            .child(
+                Button::new("retry-unavailable-lyrics")
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+            )
+            .into_any_element(),
+            LyricsViewState::Failed(_, message) => Self::player_empty_state(
+                IconName::TriangleAlert,
+                "Lyrics request failed",
+                message.clone(),
+                cx,
+            )
+            .child(
+                Button::new("retry-failed-lyrics")
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+            )
+            .into_any_element(),
+            LyricsViewState::Loaded(_, document) => self.render_lyrics_document(
+                "lyrics-scroll",
+                "lyrics-line",
+                document,
+                host_controlled,
+                true,
+                cx,
+            ),
         };
         let provider = match &self.lyrics_state {
             LyricsViewState::Loaded(_, document) => document.provider.as_str(),
             _ => "Lyrics",
         };
 
-        v_flex()
-            .h_full()
-            .w(px(360.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().font_semibold().child(provider.to_owned()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .overflow_hidden()
-                                    .child(song_title),
-                            ),
-                    )
+                Self::player_panel_header(provider.to_owned(), song_title, cx)
                     .child(
                         Button::new("refresh-lyrics")
                             .ghost()
+                            .compact()
                             .label("Refresh")
                             .disabled(self.current_song.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
@@ -26376,6 +26435,7 @@ impl MetrolistShell {
                     .child(
                         Button::new("close-lyrics")
                             .ghost()
+                            .compact()
                             .label("Close")
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_lyrics(cx))),
                     ),
@@ -26394,35 +26454,35 @@ impl MetrolistShell {
             format!("{} tracks", songs.len())
         };
         let content = match &self.playlists_state {
-            StoredViewState::Loading => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child("Loading playlists…")
-                .into_any_element(),
+            StoredViewState::Loading => Self::player_empty_state(
+                IconName::BookOpen,
+                "Loading playlists…",
+                "Fetching your local playlists.",
+                cx,
+            )
+            .child(Spinner::new())
+            .into_any_element(),
             StoredViewState::Failed(message) => v_flex()
                 .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(Icon::new(IconName::TriangleAlert))
-                .child(message.clone())
+                .p_3()
+                .child(Alert::error("playlist-picker-error", message.clone()).small())
                 .into_any_element(),
-            StoredViewState::Loaded(playlists) if playlists.is_empty() => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child("No local playlists yet")
-                .child(
-                    Button::new("picker-create-playlist")
-                        .label("Open Library")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.playlist_picker_song = None;
-                            this.navigate(Route::Library, cx);
-                        })),
-                )
-                .into_any_element(),
+            StoredViewState::Loaded(playlists) if playlists.is_empty() => Self::player_empty_state(
+                IconName::BookOpen,
+                "No local playlists yet",
+                "Create a playlist in Library, then add tracks here.",
+                cx,
+            )
+            .child(
+                Button::new("picker-create-playlist")
+                    .primary()
+                    .label("Open Library")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.playlist_picker_song = None;
+                        this.navigate(Route::Library, cx);
+                    })),
+            )
+            .into_any_element(),
             StoredViewState::Loaded(playlists) => v_flex()
                 .flex_1()
                 .min_h_0()
@@ -26432,55 +26492,44 @@ impl MetrolistShell {
                 .children(playlists.iter().map(|playlist| {
                     let playlist_songs = songs.clone();
                     let playlist_id = playlist.id;
-                    Button::new(format!("picker-playlist-{playlist_id}"))
-                        .w_full()
-                        .justify_start()
-                        .icon(IconName::Plus)
-                        .label(playlist.name.clone())
-                        .tooltip(format!("{} songs", playlist.song_count))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_songs_to_playlist(playlist_id, playlist_songs.clone(), cx);
-                        }))
-                        .into_any_element()
+                    list_row_shell(
+                        SharedString::from(format!("picker-playlist-row-{playlist_id}")),
+                        cx,
+                    )
+                    .child(media_text_block(
+                        playlist.name.clone(),
+                        format!("{} songs", playlist.song_count),
+                        None,
+                        cx,
+                    ))
+                    .child(
+                        Button::new(format!("picker-playlist-{playlist_id}"))
+                            .primary()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .label("Add")
+                            .tooltip(format!("{} songs", playlist.song_count))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_songs_to_playlist(playlist_id, playlist_songs.clone(), cx);
+                            })),
+                    )
+                    .into_any_element()
                 }))
                 .into_any_element(),
         };
 
-        v_flex()
-            .h_full()
-            .w(px(300.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(div().font_semibold().child("Add to playlist"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(picker_summary),
-                            ),
-                    )
-                    .child(
-                        Button::new("close-playlist-picker")
-                            .ghost()
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.playlist_picker_song = None;
-                                cx.notify();
-                            })),
-                    ),
+                Self::player_panel_header("Add to playlist", picker_summary, cx).child(
+                    Button::new("close-playlist-picker")
+                        .ghost()
+                        .compact()
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.playlist_picker_song = None;
+                            cx.notify();
+                        })),
+                ),
             )
             .child(content)
             .into_any_element()
@@ -26491,34 +26540,36 @@ impl MetrolistShell {
             return div().into_any_element();
         };
         let content = match &self.cloud_library_state {
-            CloudLibraryViewState::SignedOut => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child("Sign in to add songs online.")
-                .into_any_element(),
-            CloudLibraryViewState::Loading => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child("Loading online playlists…")
-                .into_any_element(),
-            CloudLibraryViewState::Failed(message) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(Icon::new(IconName::TriangleAlert))
-                .child(message.clone())
-                .child(
-                    Button::new("cloud-picker-retry")
-                        .label("Try again")
-                        .disabled(self.cloud_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.reload_cloud_library(cx);
-                        })),
-                )
-                .into_any_element(),
+            CloudLibraryViewState::SignedOut => Self::player_empty_state(
+                IconName::User,
+                "Sign in required",
+                "Sign in to add songs to YouTube Music playlists.",
+                cx,
+            )
+            .into_any_element(),
+            CloudLibraryViewState::Loading => Self::player_empty_state(
+                IconName::BookOpen,
+                "Loading online playlists…",
+                "Fetching editable YouTube Music playlists.",
+                cx,
+            )
+            .child(Spinner::new())
+            .into_any_element(),
+            CloudLibraryViewState::Failed(message) => Self::player_empty_state(
+                IconName::TriangleAlert,
+                "Could not load playlists",
+                message.clone(),
+                cx,
+            )
+            .child(
+                Button::new("cloud-picker-retry")
+                    .label("Try again")
+                    .disabled(self.cloud_busy())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reload_cloud_library(cx);
+                    })),
+            )
+            .into_any_element(),
             CloudLibraryViewState::Loaded(library) => {
                 let editable = library
                     .playlists
@@ -26526,22 +26577,22 @@ impl MetrolistShell {
                     .filter(|playlist| playlist.editable)
                     .collect::<Vec<_>>();
                 if editable.is_empty() {
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_3()
-                        .child("No editable online playlists yet")
-                        .child(
-                            Button::new("cloud-picker-create")
-                                .primary()
-                                .label("Create online playlist")
-                                .disabled(self.cloud_busy())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_create_cloud_playlist_dialog(window, cx);
-                                })),
-                        )
-                        .into_any_element()
+                    Self::player_empty_state(
+                        IconName::BookOpen,
+                        "No editable online playlists yet",
+                        "Create a YouTube Music playlist to add this track.",
+                        cx,
+                    )
+                    .child(
+                        Button::new("cloud-picker-create")
+                            .primary()
+                            .label("Create online playlist")
+                            .disabled(self.cloud_busy())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_create_cloud_playlist_dialog(window, cx);
+                            })),
+                    )
+                    .into_any_element()
                 } else {
                     v_flex()
                         .flex_1()
@@ -26552,73 +26603,57 @@ impl MetrolistShell {
                         .children(editable.into_iter().enumerate().map(|(index, playlist)| {
                             let playlist = playlist.clone();
                             let playlist_song = song.clone();
-                            Button::new(format!("cloud-picker-playlist-{index}"))
-                                .w_full()
-                                .justify_start()
-                                .icon(IconName::Plus)
-                                .label(playlist.title.clone())
-                                .tooltip(playlist.subtitle.clone())
-                                .disabled(self.cloud_busy())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_song_to_cloud_playlist(
-                                        playlist.clone(),
-                                        playlist_song.clone(),
-                                        cx,
-                                    );
-                                }))
-                                .into_any_element()
+                            list_row_shell(
+                                SharedString::from(format!("cloud-picker-playlist-row-{index}")),
+                                cx,
+                            )
+                            .child(media_text_block(
+                                playlist.title.clone(),
+                                playlist.subtitle.clone(),
+                                None,
+                                cx,
+                            ))
+                            .child(
+                                Button::new(format!("cloud-picker-playlist-{index}"))
+                                    .primary()
+                                    .compact()
+                                    .icon(IconName::Plus)
+                                    .label("Add")
+                                    .tooltip(playlist.subtitle.clone())
+                                    .disabled(self.cloud_busy())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.add_song_to_cloud_playlist(
+                                            playlist.clone(),
+                                            playlist_song.clone(),
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .into_any_element()
                         }))
                         .into_any_element()
                 }
             }
         };
 
-        v_flex()
-            .h_full()
-            .w(px(320.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(div().font_semibold().child("Add online"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(song.title),
-                            ),
-                    )
-                    .child(
-                        Button::new("close-cloud-playlist-picker")
-                            .ghost()
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cloud_playlist_picker_song = None;
-                                cx.notify();
-                            })),
-                    ),
+                Self::player_panel_header("Add online", song.title.clone(), cx).child(
+                    Button::new("close-cloud-playlist-picker")
+                        .ghost()
+                        .compact()
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cloud_playlist_picker_song = None;
+                            cx.notify();
+                        })),
+                ),
             )
             .when_some(self.cloud_library_error.clone(), |panel, message| {
                 panel.child(
                     div()
                         .m_3()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(message),
+                        .child(Alert::error("cloud-picker-error", message).small()),
                 )
             })
             .child(content)
@@ -26638,115 +26673,75 @@ impl MetrolistShell {
     fn render_now_playing_lyrics(&self, cx: &mut Context<Self>) -> AnyElement {
         let host_controlled = self.listen_together_is_guest();
         match &self.lyrics_state {
-            LyricsViewState::Idle => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::BookOpen).size_8())
-                .child(
-                    if self
-                        .current_song
-                        .as_ref()
-                        .is_some_and(|song| song.is_episode)
-                    {
-                        "Lyrics are not available for podcast episodes"
+            LyricsViewState::Idle => {
+                let episode = self
+                    .current_song
+                    .as_ref()
+                    .is_some_and(|song| song.is_episode);
+                Self::player_empty_state(
+                    IconName::BookOpen,
+                    if episode {
+                        "Lyrics unavailable"
                     } else {
                         "Lyrics have not been loaded"
                     },
-                )
-                .when(
-                    self.current_song
-                        .as_ref()
-                        .is_some_and(|song| !song.is_episode),
-                    |content| {
-                        content.child(
-                            Button::new("now-playing-load-lyrics")
-                                .label("Load lyrics")
-                                .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                        )
+                    if episode {
+                        "Lyrics are not available for podcast episodes"
+                    } else {
+                        "Load lyrics for the current track."
                     },
+                    cx,
                 )
-                .into_any_element(),
-            LyricsViewState::Loading(_) => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::LoaderCircle).size_8())
-                .child("Looking for timed lyrics…")
-                .into_any_element(),
-            LyricsViewState::Unavailable(_) => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::BookOpen).size_8())
-                .child(div().font_medium().child("Lyrics unavailable"))
-                .child(
-                    Button::new("now-playing-retry-unavailable-lyrics")
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                )
-                .into_any_element(),
-            LyricsViewState::Failed(_, message) => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(Icon::new(IconName::TriangleAlert).size_8())
-                .child(div().font_medium().child("Lyrics request failed"))
-                .child(
-                    div()
-                        .max_w(px(360.))
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(message.clone()),
-                )
-                .child(
-                    Button::new("now-playing-retry-failed-lyrics")
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
-                )
-                .into_any_element(),
-            LyricsViewState::Loaded(_, document) => {
-                v_flex()
-                    .id("now-playing-lyrics-scroll")
-                    .size_full()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.lyrics_scroll)
-                    .vertical_scrollbar(&self.lyrics_scroll)
-                    .gap_1()
-                    .p_4()
-                    .children(document.lines.iter().enumerate().map(|(index, line)| {
-                        if let Some(start) = line.start {
-                            Button::new(format!("now-playing-lyrics-line-{index}"))
-                                .ghost()
-                                .w_full()
-                                .justify_start()
-                                .label(line.text.clone())
-                                .tooltip(format!("Seek to {}", format_duration(start)))
-                                .selected(self.lyrics_active_line == Some(index))
-                                .disabled(host_controlled)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.seek_from_desktop(start, cx)
-                                }))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .w_full()
-                                .rounded(cx.theme().radius)
-                                .px_3()
-                                .py_2()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(line.text.clone())
-                                .into_any_element()
-                        }
-                    }))
-                    .into_any_element()
+                .when(!episode, |content| {
+                    content.child(
+                        Button::new("now-playing-load-lyrics")
+                            .primary()
+                            .label("Load lyrics")
+                            .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+                    )
+                })
+                .into_any_element()
             }
+            LyricsViewState::Loading(_) => Self::player_empty_state(
+                IconName::BookOpen,
+                "Looking for timed lyrics…",
+                "Searching the lyrics provider.",
+                cx,
+            )
+            .child(Spinner::new())
+            .into_any_element(),
+            LyricsViewState::Unavailable(_) => Self::player_empty_state(
+                IconName::BookOpen,
+                "Lyrics unavailable",
+                "No close metadata match was found.",
+                cx,
+            )
+            .child(
+                Button::new("now-playing-retry-unavailable-lyrics")
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+            )
+            .into_any_element(),
+            LyricsViewState::Failed(_, message) => Self::player_empty_state(
+                IconName::TriangleAlert,
+                "Lyrics request failed",
+                message.clone(),
+                cx,
+            )
+            .child(
+                Button::new("now-playing-retry-failed-lyrics")
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_lyrics(cx))),
+            )
+            .into_any_element(),
+            LyricsViewState::Loaded(_, document) => self.render_lyrics_document(
+                "now-playing-lyrics-scroll",
+                "now-playing-lyrics-line",
+                document,
+                host_controlled,
+                false,
+                cx,
+            ),
         }
     }
 
@@ -26831,10 +26826,18 @@ impl MetrolistShell {
                     .gap_2()
                     .p_3()
                     .when(recommendations.is_empty(), |list| {
-                        list.items_center().justify_center().child(if loading {
-                            "Loading related songs…"
+                        list.child(if loading {
+                            Alert::info("now-playing-related-loading", "Loading related songs…")
+                                .small()
+                                .into_any_element()
                         } else {
-                            "Start radio for the current song to load related songs"
+                            Alert::info(
+                                "now-playing-related-empty",
+                                "Start radio for the current song to load related songs.",
+                            )
+                            .small()
+                            .title("No related songs")
+                            .into_any_element()
                         })
                     })
                     .children(
@@ -27057,12 +27060,13 @@ impl MetrolistShell {
 
     fn render_now_playing_details(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(song) = self.current_song.as_ref() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child("Nothing playing")
-                .into_any_element();
+            return Self::player_empty_state(
+                IconName::Play,
+                "Nothing playing",
+                "Choose a song to inspect its details.",
+                cx,
+            )
+            .into_any_element();
         };
         let video_id = song.video_id.clone();
         let link = format!("https://music.youtube.com/watch?v={video_id}");
@@ -27133,18 +27137,17 @@ impl MetrolistShell {
             .gap_3()
             .p_4()
             .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
                     .child(div().font_semibold().child("Equalizer"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Active: {current}")),
-                    ),
+                    .child(Tag::primary().small().rounded_full().child(current)),
             )
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_1()
                     .children(EqualizerPreset::ALL.into_iter().map(|preset| {
                         let selected = if preset == EqualizerPreset::Flat {
@@ -27215,42 +27218,17 @@ impl MetrolistShell {
             return div().into_any_element();
         };
         let song = state.song();
-        v_flex()
-            .h_full()
-            .w(px(400.))
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+        Self::player_side_panel(cx)
             .child(
-                h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().font_semibold().child("Song details"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(song.title.clone()),
-                            ),
-                    )
-                    .child(
-                        Button::new("close-media-info-panel")
-                            .ghost()
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_media_info_panel(cx);
-                            })),
-                    ),
+                Self::player_panel_header("Song details", song.title.clone(), cx).child(
+                    Button::new("close-media-info-panel")
+                        .ghost()
+                        .compact()
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_media_info_panel(cx);
+                        })),
+                ),
             )
             .child(
                 v_flex()
@@ -27288,9 +27266,10 @@ impl MetrolistShell {
             }
             let browse = artist.clone();
             links.push(
-                Link::new(format!("now-playing-artist-{index}"))
-                    .text_sm()
-                    .child(artist.title)
+                Button::new(format!("now-playing-artist-{index}"))
+                    .link()
+                    .compact()
+                    .label(artist.title)
                     .on_click({
                         let view = view.clone();
                         move |_, _, cx| {
@@ -27314,9 +27293,10 @@ impl MetrolistShell {
                 );
             }
             links.push(
-                Link::new("now-playing-album")
-                    .text_sm()
-                    .child(album.title.clone())
+                Button::new("now-playing-album")
+                    .link()
+                    .compact()
+                    .label(album.title.clone())
                     .on_click({
                         let view = view.clone();
                         move |_, _, cx| {
@@ -27371,14 +27351,26 @@ impl MetrolistShell {
         let view = cx.entity();
 
         h_flex()
+            .w_full()
             .items_center()
             .justify_center()
-            .gap_1()
+            .flex_wrap()
+            .gap_2()
             .child(
-                icon_ghost_button(
-                    "now-playing-favorite",
-                    IconName::Heart,
-                    if song.is_episode && favorite {
+                Button::new("now-playing-favorite")
+                    .outline()
+                    .compact()
+                    .icon(IconName::Heart)
+                    .label(if song.is_episode && favorite {
+                        "Saved"
+                    } else if song.is_episode {
+                        "Save"
+                    } else if favorite {
+                        "Favourited"
+                    } else {
+                        "Favourite"
+                    })
+                    .tooltip(if song.is_episode && favorite {
                         "Remove from Later"
                     } else if song.is_episode {
                         "Save for later"
@@ -27386,39 +27378,39 @@ impl MetrolistShell {
                         "Remove favourite"
                     } else {
                         "Add to favourites"
-                    },
-                )
-                .selected(favorite)
-                .disabled(if song.is_episode {
-                    self.podcast_busy()
-                } else {
-                    self.library_busy()
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if favorite_song.is_episode {
-                        this.toggle_episode_for_later(favorite_song.clone(), cx);
+                    })
+                    .selected(favorite)
+                    .disabled(if song.is_episode {
+                        self.podcast_busy()
                     } else {
-                        this.toggle_favorite(favorite_song.clone(), cx);
-                    }
-                })),
+                        self.library_busy()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if favorite_song.is_episode {
+                            this.toggle_episode_for_later(favorite_song.clone(), cx);
+                        } else {
+                            this.toggle_favorite(favorite_song.clone(), cx);
+                        }
+                    })),
             )
             .child(
-                icon_ghost_button(
-                    "now-playing-local-playlist",
-                    IconName::Plus,
-                    "Add to playlist",
-                )
-                .on_click({
-                    let song = song.clone();
-                    cx.listener(move |this, _, _, cx| {
-                        this.open_playlist_picker(song.clone(), cx);
-                    })
-                }),
+                Button::new("now-playing-local-playlist")
+                    .outline()
+                    .compact()
+                    .icon(IconName::Plus)
+                    .label("Playlist")
+                    .tooltip("Add to playlist")
+                    .on_click({
+                        let song = song.clone();
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_playlist_picker(song.clone(), cx);
+                        })
+                    }),
             )
             .child(self.download_lifecycle_button("now-playing-download".into(), song, cx))
             .child(
                 Button::new("now-playing-more")
-                    .ghost()
+                    .outline()
                     .compact()
                     .icon(IconName::Ellipsis)
                     .tooltip("More actions")
@@ -27624,9 +27616,31 @@ impl MetrolistShell {
         let Some(song) = self.current_song.as_ref() else {
             return v_flex()
                 .size_full()
-                .items_center()
-                .justify_center()
-                .child("Nothing playing")
+                .bg(cx.theme().background)
+                .child(
+                    h_flex()
+                        .h(px(64.))
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap_3()
+                        .px_5()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Button::new("close-now-playing")
+                                .ghost()
+                                .icon(IconName::ArrowLeft)
+                                .label("Back")
+                                .on_click(cx.listener(|this, _, _, cx| this.close_now_playing(cx))),
+                        )
+                        .child(div().font_semibold().child("Now playing")),
+                )
+                .child(Self::player_empty_state(
+                    IconName::Play,
+                    "Nothing playing",
+                    "Choose a song to start the player.",
+                    cx,
+                ))
                 .into_any_element();
         };
         let viewport = window.viewport_size();
@@ -27681,6 +27695,7 @@ impl MetrolistShell {
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .flex_wrap()
                     .gap_6()
                     .p_5()
                     .child(
@@ -27691,63 +27706,74 @@ impl MetrolistShell {
                             .items_center()
                             .justify_center()
                             .gap_4()
-                            .child(
+                            .child({
+                                let cover_shadows = cx.theme().shadow_tokens().md;
                                 div()
                                     .relative()
                                     .size(art_size)
                                     .flex_shrink_0()
-                                    .child(self.render_thumbnail(
-                                        song.thumbnail_url.as_deref(),
-                                        art_size,
-                                        IconName::Play,
-                                        cx,
-                                    ))
-                                    .when(!host_controlled, |artwork| {
-                                        artwork.child(
-                                            h_flex()
-                                                .absolute()
-                                                .inset_0()
-                                                .child(
-                                                    div()
-                                                        .id("now-playing-artwork-seek-back")
-                                                        .h_full()
-                                                        .flex_1()
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(
-                                                            |this, event: &ClickEvent, _, cx| {
-                                                                if event.click_count() >= 2
-                                                                    && event.click_count() % 2 == 0
-                                                                {
-                                                                    this.seek_from_artwork(
-                                                                        DesktopSeekDirection::Backward,
-                                                                        cx,
-                                                                    );
-                                                                }
-                                                            },
-                                                        )),
+                                    .rounded(cx.theme().radius_lg)
+                                    .when(!cover_shadows.is_empty(), |cover| {
+                                        cover.shadow(cover_shadows)
+                                    })
+                                    .child(
+                                        div()
+                                            .size_full()
+                                            .overflow_hidden()
+                                            .rounded(cx.theme().radius_lg)
+                                            .child(self.render_thumbnail(
+                                                song.thumbnail_url.as_deref(),
+                                                art_size,
+                                                IconName::Play,
+                                                cx,
+                                            ))
+                                            .when(!host_controlled, |artwork| {
+                                                artwork.child(
+                                                    h_flex()
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .child(
+                                                            div()
+                                                                .id("now-playing-artwork-seek-back")
+                                                                .h_full()
+                                                                .flex_1()
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    |this, event: &ClickEvent, _, cx| {
+                                                                        if event.click_count() >= 2
+                                                                            && event.click_count() % 2 == 0
+                                                                        {
+                                                                            this.seek_from_artwork(
+                                                                                DesktopSeekDirection::Backward,
+                                                                                cx,
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("now-playing-artwork-seek-forward")
+                                                                .h_full()
+                                                                .flex_1()
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    |this, event: &ClickEvent, _, cx| {
+                                                                        if event.click_count() >= 2
+                                                                            && event.click_count() % 2 == 0
+                                                                        {
+                                                                            this.seek_from_artwork(
+                                                                                DesktopSeekDirection::Forward,
+                                                                                cx,
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                )),
+                                                        ),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .id("now-playing-artwork-seek-forward")
-                                                        .h_full()
-                                                        .flex_1()
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(
-                                                            |this, event: &ClickEvent, _, cx| {
-                                                                if event.click_count() >= 2
-                                                                    && event.click_count() % 2 == 0
-                                                                {
-                                                                    this.seek_from_artwork(
-                                                                        DesktopSeekDirection::Forward,
-                                                                        cx,
-                                                                    );
-                                                                }
-                                                            },
-                                                        )),
-                                                ),
-                                        )
-                                    }),
-                            )
+                                            }),
+                                    )
+                            })
                             .child(
                                 v_flex()
                                     .max_w(art_size)
@@ -27756,7 +27782,8 @@ impl MetrolistShell {
                                     .gap_1()
                                     .child(
                                         title_line(song.title.clone())
-                                            .text_xl()
+                                            .when(art_size >= px(360.), |title| title.text_2xl())
+                                            .when(art_size < px(360.), |title| title.text_xl())
                                             .font_semibold()
                                             .text_center(),
                                     )
@@ -27771,13 +27798,14 @@ impl MetrolistShell {
                     .child(
                         v_flex()
                             .h_full()
-                            .min_w(px(320.))
+                            .min_w(px(300.))
+                            .min_h(px(280.))
                             .flex_1()
-                            .min_h_0()
                             .overflow_hidden()
                             .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .child(
                                 TabBar::new("now-playing-tabs")
                                     .w_full()
@@ -27800,7 +27828,7 @@ impl MetrolistShell {
                                     .child(Tab::new().flex_1().label("Details"))
                                     .child(Tab::new().flex_1().label("EQ")),
                             )
-                            .child(pane),
+                            .child(div().flex_1().min_h_0().bg(cx.theme().background).child(pane)),
                     ),
             )
             .into_any_element()
@@ -27978,13 +28006,15 @@ impl MetrolistShell {
         });
 
         h_flex()
-            .h(if compact { px(108.) } else { px(76.) })
+            .min_h(if compact { px(108.) } else { px(72.) })
+            .when(!compact, |player| player.h(px(72.)))
             .flex_shrink_0()
             .flex_wrap()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().secondary)
             .px_4()
+            .py_2()
             .gap_3()
             .items_center()
             .child(
@@ -27997,14 +28027,14 @@ impl MetrolistShell {
                     .cursor_pointer()
                     .rounded(cx.theme().radius)
                     .p_1()
-                    .hover(|style| style.bg(cx.theme().secondary))
+                    .hover(|style| style.bg(cx.theme().background))
                     .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(cx)))
                     .child(
                         self.render_thumbnail(
                             self.current_song
                                 .as_ref()
                                 .and_then(|song| song.thumbnail_url.as_deref()),
-                            px(48.),
+                            px(52.),
                             IconName::Play,
                             cx,
                         ),
@@ -28017,7 +28047,11 @@ impl MetrolistShell {
                             .child(caption_line(subtitle, cx.theme().muted_foreground)),
                     )
                     .when(has_current_song, |metadata| {
-                        metadata.child(Icon::new(IconName::Maximize).size_4())
+                        metadata.child(
+                            Icon::new(IconName::Maximize)
+                                .size_4()
+                                .text_color(cx.theme().muted_foreground),
+                        )
                     }),
             )
             .when_some(mini_actions, |player, actions| player.child(actions))
@@ -28029,7 +28063,8 @@ impl MetrolistShell {
                     .items_center()
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_2()
+                            .items_center()
                             .child(
                                 icon_ghost_button(
                                     "shuffle",
@@ -28045,44 +28080,63 @@ impl MetrolistShell {
                                 )),
                             )
                             .child(
-                                icon_ghost_button("previous", IconName::ArrowLeft, "Previous")
-                                    .disabled(
-                                        host_controlled
-                                            || self.current_song.is_none()
-                                            || (!self.queue.has_previous()
-                                                && self.repeat_mode != RepeatMode::All
-                                                && snapshot.position < Duration::from_secs(5)),
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .px_1()
+                                    .py_0p5()
+                                    .child(
+                                        Button::new("previous")
+                                            .ghost()
+                                            .compact()
+                                            .icon(IconName::ArrowLeft)
+                                            .tooltip("Previous")
+                                            .disabled(
+                                                host_controlled
+                                                    || self.current_song.is_none()
+                                                    || (!self.queue.has_previous()
+                                                        && self.repeat_mode != RepeatMode::All
+                                                        && snapshot.position
+                                                            < Duration::from_secs(5)),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.play_previous(window, cx);
+                                            })),
                                     )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.play_previous(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("play")
-                                    .primary()
-                                    .compact()
-                                    .icon(play_icon)
-                                    .tooltip(if state == PlaybackState::Playing {
-                                        "Pause"
-                                    } else {
-                                        "Play"
-                                    })
-                                    .disabled(!can_toggle)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_playback(window, cx);
-                                    })),
-                            )
-                            .child(
-                                icon_ghost_button("next", IconName::ArrowRight, "Next")
-                                    .disabled(
-                                        host_controlled
-                                            || self.current_song.is_none()
-                                            || (!self.queue.has_next()
-                                                && self.repeat_mode != RepeatMode::All),
+                                    .child(
+                                        Button::new("play")
+                                            .primary()
+                                            .icon(play_icon)
+                                            .tooltip(if state == PlaybackState::Playing {
+                                                "Pause"
+                                            } else {
+                                                "Play"
+                                            })
+                                            .disabled(!can_toggle)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_playback(window, cx);
+                                            })),
                                     )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.play_next(window, cx);
-                                    })),
+                                    .child(
+                                        Button::new("next")
+                                            .ghost()
+                                            .compact()
+                                            .icon(IconName::ArrowRight)
+                                            .tooltip("Next")
+                                            .disabled(
+                                                host_controlled
+                                                    || self.current_song.is_none()
+                                                    || (!self.queue.has_next()
+                                                        && self.repeat_mode != RepeatMode::All),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.play_next(window, cx);
+                                            })),
+                                    ),
                             )
                             .child(
                                 icon_ghost_button(
@@ -28107,9 +28161,10 @@ impl MetrolistShell {
                             .w_full()
                             .gap_3()
                             .items_center()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format_duration(display_position))
+                            .child(Self::player_time_label(
+                                format_duration(display_position),
+                                cx,
+                            ))
                             .child(
                                 div().flex_1().child(
                                     Slider::new(&self.progress_slider)
@@ -28117,11 +28172,12 @@ impl MetrolistShell {
                                         .disabled(!can_seek),
                                 ),
                             )
-                            .child(
+                            .child(Self::player_time_label(
                                 duration
                                     .map(format_duration)
                                     .unwrap_or_else(|| "0:00".into()),
-                            ),
+                                cx,
+                            )),
                     ),
             )
             .child(
@@ -28134,11 +28190,12 @@ impl MetrolistShell {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{:.0}%", snapshot.volume * 100.0))
+                            .child(Self::player_time_label(
+                                format!("{:.0}%", snapshot.volume * 100.0),
+                                cx,
+                            ))
                             .child(
-                                div().flex_1().min_w(px(72.)).child(
+                                div().flex_1().min_w(px(72.)).max_w(px(160.)).child(
                                     Slider::new(&self.volume_slider)
                                         .horizontal()
                                         .disabled(host_controlled),
@@ -28146,17 +28203,23 @@ impl MetrolistShell {
                             )
                             .when_some(snapshot.normalization_gain_mb, |labels, gain_mb| {
                                 labels.child(
-                                    div().child(format!("{:+.1} dB", gain_mb as f32 / 100.0)),
+                                    Tag::secondary()
+                                        .small()
+                                        .child(format!("{:+.1} dB", gain_mb as f32 / 100.0)),
                                 )
                             })
                             .when(snapshot.equalizer_active, |labels| {
-                                labels.child(div().child("EQ"))
+                                labels.child(Tag::secondary().small().child("EQ"))
+                            })
+                            .when(radio_matches_current, |labels| {
+                                labels.child(Tag::info().small().child("Radio"))
                             }),
                     )
                     .child(
                         h_flex()
                             .w_full()
                             .justify_end()
+                            .flex_wrap()
                             .gap_1()
                             .child(
                                 Button::new("playback-parameters")
@@ -28239,7 +28302,12 @@ impl MetrolistShell {
                                         this.queue_visible = opening;
                                         cx.notify();
                                     })),
-                            ),
+                            )
+                            .child(self.render_sleep_timer_button(
+                                "mini-player-sleep-timer",
+                                host_controlled,
+                                cx,
+                            )),
                     ),
             )
     }
