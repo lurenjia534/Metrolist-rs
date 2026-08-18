@@ -24,6 +24,41 @@ Android Metrolist 只读参考业务行为和点击路径；桌面 UI 以锁定�
 
 P2/P3 已存在的代码只做回归维护，在 P0 矩阵全部完成前不得继续扩展。
 
+## 进行中：gpui-component Styled UI 美化（并行 worktree）
+
+状态：进行中。用户明确要求多个 worktree + 多个子代理并行改 UI。本轮覆盖
+视觉与组件用法，不新开业务功能。
+
+界面已能工作，但大量入口仍是手写 `div`/`h_flex`，没有系统使用锁定
+`gpui-component`（`f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c`）的 Styled
+组件、变体和主题 token。本轮把壳层、列表、卡片、播放器和设置改成组件库
+Styled UI，让界面更接近官方 Sidebar / TitleBar / GroupBox / Button / Alert /
+Skeleton 示例。
+
+并行切片（互不重叠的文件或 `shell.rs` 行区间）：
+
+| 代理 | 范围 | 文件 |
+| --- | --- | --- |
+| styled-kit | 共享 Styled 积木 | `src/ui/styled.rs`（新建）、`src/ui/widgets.rs`、`src/ui/mod.rs` |
+| chrome | TitleBar、Root overlay、侧栏、页头、窗口框 | `src/main.rs`、`src/ui/shell.rs` 的 `render_sidebar` / `page_heading` / `feature_card` / `Render` |
+| browse | Home / Explore / Search / Browse / 歌曲瓦片与行 | `src/ui/shell.rs` `render_home_section` … `render_search` |
+| library | Stats / History / Library / 歌单详情 / Recognize | `src/ui/shell.rs` `render_stats_metric_card` … `render_library` |
+| player | 迷你播放器、完整播放器、队列/歌词/Picker | `src/ui/shell.rs` `render_sleep_timer_button` … `render_player` |
+
+设置页已用 `Settings` + `GroupBox`，本轮不单独开设置代理，避免与
+library/chrome 抢同一文件尾部。
+
+### 完成定义
+
+1. 新的或改过的界面优先用 `gpui-component` 组件（Button 变体、GroupBox、Alert、
+   Skeleton、Spinner、Tag、Avatar、TabBar、TitleBar、Sidebar、Slider），而不是
+   再堆一套手写色块。
+2. 颜色、圆角、间距只来自 `cx.theme()` 与组件默认值；不写死另一套调色板。
+3. 新 helper 若自成组件，实现 `Styled`（`StyleRefinement` + `refine_style`）。
+4. 不改业务状态机、点击语义、网络、SQLite；不删 `CORE_UI_PARITY.md` 入口。
+5. 各 worktree 只跑一次 `cargo fmt --all && cargo check --all-targets`。
+6. 合并后主仓库再跑同一最小门禁。
+
 ## 已实现切片：Content Settings 过滤
 
 状态：功能、持久化与 UI 已实现，待真实桌面列表点击验收。
