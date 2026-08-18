@@ -1,10 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{
-    ActiveTheme, Icon, IconName, StyledExt,
-    button::{Button, ButtonVariants},
-    h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme, Icon, IconName, StyledExt, h_flex, v_flex};
+
+pub use super::styled::{icon_ghost_button, section_heading};
 
 pub const MEDIA_TILE_WIDTH: Pixels = px(176.);
 pub const MEDIA_TILE_MIN_WIDTH: Pixels = px(156.);
@@ -41,24 +39,12 @@ pub fn media_text_block(
     v_flex()
         .flex_1()
         .min_w_0()
-        .gap_0()
+        .gap_1()
         .child(title_line(title))
         .child(subtitle_line(subtitle, muted))
         .when_some(extra, |column, extra| {
             column.child(caption_line(extra, muted))
         })
-}
-
-pub fn icon_ghost_button(
-    id: impl Into<ElementId>,
-    icon: IconName,
-    tooltip: impl Into<SharedString>,
-) -> Button {
-    Button::new(id)
-        .ghost()
-        .compact()
-        .icon(icon)
-        .tooltip(tooltip)
 }
 
 pub fn tile_row() -> Div {
@@ -71,11 +57,18 @@ pub fn media_tile_shell(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
         .w(MEDIA_TILE_WIDTH)
         .min_w(MEDIA_TILE_MIN_WIDTH)
         .max_w(MEDIA_TILE_MAX_WIDTH)
-        .gap_2()
+        .gap_3()
         .rounded(cx.theme().radius_lg)
-        .p_2()
+        .border_1()
+        .border_color(cx.theme().border)
+        .p_3()
         .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().secondary))
+        .hover(|style| {
+            style
+                .bg(cx.theme().secondary)
+                .border_color(cx.theme().accent)
+        })
+        .active(|style| style.bg(cx.theme().accent))
 }
 
 pub fn cover_frame(cx: &App) -> Div {
@@ -84,7 +77,9 @@ pub fn cover_frame(cx: &App) -> Div {
         .w_full()
         .aspect_square()
         .overflow_hidden()
-        .rounded(cx.theme().radius)
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
         .bg(cx.theme().muted)
         .flex_shrink_0()
 }
@@ -92,13 +87,13 @@ pub fn cover_frame(cx: &App) -> Div {
 pub fn cover_play_badge(cx: &App) -> Div {
     div()
         .absolute()
-        .right(px(8.))
-        .bottom(px(8.))
+        .right_2()
+        .bottom_2()
         .size_8()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(999.))
+        .rounded_full()
         .bg(cx.theme().primary)
         .text_color(cx.theme().primary_foreground)
         .child(Icon::new(IconName::Play).size_4())
@@ -113,11 +108,12 @@ pub fn list_row_shell(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
         .overflow_hidden()
         .gap_3()
         .items_center()
-        .rounded(cx.theme().radius)
-        .px_2()
-        .py_1()
+        .rounded(cx.theme().radius_lg)
+        .px_3()
+        .py_2()
         .cursor_pointer()
         .hover(|style| style.bg(cx.theme().secondary))
+        .active(|style| style.bg(cx.theme().accent))
 }
 
 pub fn featured_card_shell(cx: &App) -> Div {
@@ -125,28 +121,11 @@ pub fn featured_card_shell(cx: &App) -> Div {
         .w_full()
         .max_w(px(720.))
         .min_w_0()
-        .gap_4()
+        .gap_3()
         .items_center()
         .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
         .bg(cx.theme().secondary)
         .p_4()
-}
-
-pub fn section_heading(
-    title: impl Into<SharedString>,
-    subtitle: Option<SharedString>,
-    cx: &App,
-) -> Div {
-    v_flex()
-        .flex_1()
-        .gap_1()
-        .child(div().text_lg().font_semibold().child(title.into()))
-        .when_some(subtitle, |column, subtitle| {
-            column.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(subtitle),
-            )
-        })
 }
