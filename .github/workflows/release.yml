@@ -1,0 +1,252 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_BUNDLE_VERSION: "0.11.0"
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Validate tag against Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [[ "$GITHUB_REF_NAME" != v* || "$tag_version" != "$package_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must exactly match Cargo.toml version v$package_version" >&2
+            exit 1
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x86_64
+          - name: Windows x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x86_64
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            artifact: macos-aarch64
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: macos-x86_64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libdbus-1-dev \
+            libfontconfig-dev \
+            libgtk-3-dev \
+            libwayland-dev \
+            libwebkit2gtk-4.1-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libvulkan1
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Cargo sources
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-home-
+
+      - name: Cache release build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-target-release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-target-release-
+
+      - name: Cache cargo-bundle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-bundle
+            ~/.cargo/bin/cargo-bundle.exe
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-bundle-${{ env.CARGO_BUNDLE_VERSION }}
+
+      - name: Install cargo-bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if ! cargo-bundle --version 2>/dev/null | grep -Fq "${CARGO_BUNDLE_VERSION}"; then
+            cargo install cargo-bundle --version "${CARGO_BUNDLE_VERSION}" --locked --force
+          fi
+
+      - name: Install cargo-bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = cargo-bundle --version 2>$null
+          if ($LASTEXITCODE -ne 0 -or $installed -notmatch [regex]::Escape($env:CARGO_BUNDLE_VERSION)) {
+            cargo install cargo-bundle --version $env:CARGO_BUNDLE_VERSION --locked --force
+          }
+
+      - name: Build locked release binary
+        run: cargo build --release --locked --bin metrolist
+
+      - name: Package Linux release
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo bundle --release --format deb
+          mkdir -p dist
+          package="Metrolist-v${VERSION}-linux-x86_64"
+          mkdir "$package"
+          install -m 755 target/release/metrolist "$package/metrolist"
+          install -m 644 LICENSE "$package/LICENSE"
+          tar -czf "dist/${package}.tar.gz" "$package"
+          deb="$(find target/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          test -n "$deb"
+          cp "$deb" "dist/${package}.deb"
+
+      - name: Package macOS release
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo bundle --release --format osx
+          mkdir -p dist
+          app="$(find target/release/bundle/osx -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          case "$TARGET" in
+            aarch64-apple-darwin) arch="aarch64" ;;
+            x86_64-apple-darwin) arch="x86_64" ;;
+            *) echo "Unsupported macOS target: $TARGET" >&2; exit 1 ;;
+          esac
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "dist/Metrolist-v${VERSION}-macos-${arch}.app.zip"
+
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo bundle --release --format msi
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $package = "Metrolist-v$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force $package | Out-Null
+          Copy-Item target/release/metrolist.exe "$package/metrolist.exe"
+          Copy-Item LICENSE "$package/LICENSE"
+          Compress-Archive -Path $package -DestinationPath "dist/$package.zip"
+          $msi = Get-ChildItem target/release/bundle/msi -Filter *.msi -File | Select-Object -First 1
+          if (-not $msi) { throw "cargo-bundle did not produce an MSI" }
+          Copy-Item $msi.FullName "dist/$package.msi"
+
+      - name: Upload packaged release
+        uses: actions/upload-artifact@v7
+        with:
+          name: metrolist-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: metrolist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum ./* > SHA256SUMS.txt
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=(
+            "$TAG"
+            dist/*
+            --verify-tag
+            --generate-notes
+            --notes "> [!NOTE]
+          > macOS packages use an ad-hoc integrity signature and are not Apple-notarized. Windows packages are not Authenticode-signed."
+            --title "Metrolist v${VERSION}"
+          )
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"

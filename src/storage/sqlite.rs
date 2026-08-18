@@ -6131,14 +6131,43 @@ mod tests {
         path
     }
 
-    fn downgrade_playback_session_to_v18(connection: &Connection) {
+    fn database_at_legacy_version(name: &str, version: usize) -> (PathBuf, Connection) {
+        let path = temporary_database(name);
+        let mut connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE playback_session DROP COLUMN repeat_mode;
-                 ALTER TABLE playback_session DROP COLUMN shuffle_enabled;
-                 DELETE FROM schema_migration WHERE version = 19;",
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migration (
+                     version INTEGER PRIMARY KEY,
+                     applied_at_ms INTEGER NOT NULL
+                 );",
             )
             .unwrap();
+        let migrations: [fn(&mut Connection) -> Result<()>; 18] = [
+            migrate_to_v1,
+            migrate_to_v2,
+            migrate_to_v3,
+            migrate_to_v4,
+            migrate_to_v5,
+            migrate_to_v6,
+            migrate_to_v7,
+            migrate_to_v8,
+            migrate_to_v9,
+            migrate_to_v10,
+            migrate_to_v11,
+            migrate_to_v12,
+            migrate_to_v13,
+            migrate_to_v14,
+            migrate_to_v15,
+            migrate_to_v16,
+            migrate_to_v17,
+            migrate_to_v18,
+        ];
+        assert!((1..=migrations.len()).contains(&version));
+        for migrate in migrations.into_iter().take(version) {
+            migrate(&mut connection).unwrap();
+        }
+        (path, connection)
     }
 
     #[test]
@@ -6328,23 +6357,16 @@ mod tests {
 
     #[test]
     fn v16_database_upgrades_to_podcast_state_without_losing_library_data() {
-        let path = temporary_database("v16-podcast-upgrade");
-        let store = DesktopStore::open(&path).unwrap();
-        futures::executor::block_on(store.set_favorite(song("kept-v16"), true)).unwrap();
-        drop(store);
-
-        let connection = Connection::open(&path).unwrap();
-        downgrade_playback_session_to_v18(&connection);
-        connection
-            .execute_batch(
-                "DROP TABLE podcast_subscription_tombstone;
-                 DELETE FROM schema_migration WHERE version = 18;
-                 DROP TABLE episode_playback_position;
-                 DROP TABLE episode_for_later;
-                 DROP TABLE podcast_subscription;
-                 DELETE FROM schema_migration WHERE version = 17;",
+        let (path, mut connection) = database_at_legacy_version("v16-podcast-upgrade", 16);
+        let transaction = connection.transaction().unwrap();
+        insert_song_before_v15(&transaction, &song("kept-v16"));
+        transaction
+            .execute(
+                "INSERT INTO favorite_song(video_id, liked_at_ms) VALUES ('kept-v16', 1)",
+                [],
             )
             .unwrap();
+        transaction.commit().unwrap();
         drop(connection);
 
         let store = DesktopStore::open(&path).unwrap();
@@ -6374,18 +6396,22 @@ mod tests {
 
     #[test]
     fn v17_database_upgrades_to_podcast_tombstones_without_losing_state() {
-        let path = temporary_database("v17-podcast-tombstone-upgrade");
-        let store = DesktopStore::open(&path).unwrap();
+        let (path, connection) = database_at_legacy_version("v17-podcast-tombstone-upgrade", 17);
         let saved = podcast("MPSP-kept-v17", 17);
-        futures::executor::block_on(store.set_podcast_subscription(saved.clone(), true)).unwrap();
-        drop(store);
-
-        let connection = Connection::open(&path).unwrap();
-        downgrade_playback_session_to_v18(&connection);
         connection
-            .execute_batch(
-                "DROP TABLE podcast_subscription_tombstone;
-                 DELETE FROM schema_migration WHERE version = 18;",
+            .execute(
+                "INSERT INTO podcast_subscription(
+                     podcast_id, title, author, thumbnail_url, channel_id,
+                     subscribed_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    saved.podcast_id,
+                    saved.title,
+                    saved.author,
+                    saved.thumbnail_url,
+                    saved.channel_id,
+                    saved.subscribed_at_ms,
+                ],
             )
             .unwrap();
         drop(connection);
@@ -6424,22 +6450,20 @@ mod tests {
 
     #[test]
     fn v18_database_upgrades_playback_modes_with_safe_defaults() {
-        let path = temporary_database("v18-playback-modes-upgrade");
-        let store = DesktopStore::open(&path).unwrap();
-        let legacy_session = PersistedSession {
-            queue: vec![song("one"), song("two")],
-            current_index: Some(1),
-            position: Duration::from_secs(42),
-            volume: 0.7,
-            repeat_mode: RepeatMode::One,
-            shuffle_enabled: true,
-            playback_source: None,
-        };
-        futures::executor::block_on(store.save_session(legacy_session)).unwrap();
-        drop(store);
-
-        let connection = Connection::open(&path).unwrap();
-        downgrade_playback_session_to_v18(&connection);
+        let (path, mut connection) = database_at_legacy_version("v18-playback-modes-upgrade", 18);
+        let transaction = connection.transaction().unwrap();
+        insert_song_before_v15(&transaction, &song("one"));
+        insert_song_before_v15(&transaction, &song("two"));
+        transaction
+            .execute_batch(
+                "INSERT INTO playback_session(
+                     singleton, current_index, position_ms, volume, updated_at_ms
+                 ) VALUES (1, 1, 42000, 0.7, 0);
+                 INSERT INTO queue_item(position, video_id) VALUES (0, 'one');
+                 INSERT INTO queue_item(position, video_id) VALUES (1, 'two');",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
         drop(connection);
 
         let store = DesktopStore::open(&path).unwrap();

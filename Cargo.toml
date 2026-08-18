@@ -2,7 +2,10 @@
 name = "Metrolist-rs"
 version = "0.1.0"
 edition = "2024"
+authors = ["luren <lurenjia534@outlook.com>"]
 license = "GPL-3.0-only"
+description = "A cross-platform YouTube Music desktop client built with Rust and GPUI"
+repository = "https://github.com/lurenjia534/Metrolist-rs"
 
 [lib]
 name = "metrolist_rs"
@@ -14,6 +17,16 @@ path = "src/main.rs"
 [package.metadata.bundle]
 name = "Metrolist"
 identifier = "com.metrolist.music.desktop"
+short_description = "A cross-platform YouTube Music desktop client"
+resources = ["LICENSE"]
+deb_depends = [
+    "libasound2",
+    "libdbus-1-3",
+    "libgtk-3-0",
+    "libsecret-1-0",
+    "libwebkit2gtk-4.1-0",
+    "libxkbcommon-x11-0",
+]
 osx_info_plist_exts = ["packaging/macos/Info.plist.ext"]
 
 [dependencies]
