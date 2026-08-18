@@ -115,6 +115,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-target-release-
 
       - name: Cache cargo-bundle
+        if: runner.os != 'Windows'
         uses: actions/cache@v5
         with:
           path: |
@@ -129,20 +130,6 @@ jobs:
           if ! cargo-bundle --version 2>/dev/null | grep -Fq "${CARGO_BUNDLE_VERSION}"; then
             cargo install cargo-bundle --version "${CARGO_BUNDLE_VERSION}" --locked --force
           fi
-
-      - name: Install cargo-bundle (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $command = Get-Command cargo-bundle -ErrorAction SilentlyContinue
-          if (-not $command) {
-            cargo install cargo-bundle --version $env:CARGO_BUNDLE_VERSION --locked --force
-          } else {
-            $installed = cargo-bundle --version
-            if ($LASTEXITCODE -ne 0 -or $installed -notmatch [regex]::Escape($env:CARGO_BUNDLE_VERSION)) {
-              cargo install cargo-bundle --version $env:CARGO_BUNDLE_VERSION --locked --force
-            }
-          }
 
       - name: Build locked release binary
         run: cargo build --release --locked --bin metrolist
@@ -194,16 +181,12 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          cargo bundle --release --format msi
           New-Item -ItemType Directory -Force dist | Out-Null
           $package = "Metrolist-v$env:VERSION-windows-x86_64"
           New-Item -ItemType Directory -Force $package | Out-Null
           Copy-Item target/release/metrolist.exe "$package/metrolist.exe"
           Copy-Item LICENSE "$package/LICENSE"
           Compress-Archive -Path $package -DestinationPath "dist/$package.zip"
-          $msi = Get-ChildItem target/release/bundle/msi -Filter *.msi -File | Select-Object -First 1
-          if (-not $msi) { throw "cargo-bundle did not produce an MSI" }
-          Copy-Item $msi.FullName "dist/$package.msi"
 
       - name: Upload packaged release
         uses: actions/upload-artifact@v7
@@ -248,7 +231,7 @@ jobs:
             --verify-tag
             --generate-notes
             --notes "> [!NOTE]
-          > macOS packages use an ad-hoc integrity signature and are not Apple-notarized. Windows packages are not Authenticode-signed."
+          > macOS packages use an ad-hoc integrity signature and are not Apple-notarized. The Windows package is not Authenticode-signed."
             --title "Metrolist v${VERSION}"
           )
           if [[ "$VERSION" == *-* ]]; then
