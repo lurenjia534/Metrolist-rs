@@ -8,12 +8,13 @@ use gpui_component::{
     clipboard::Clipboard,
     description_list::{DescriptionItem, DescriptionList},
     dialog::DialogButtonProps,
-    group_box::{GroupBox, GroupBoxVariants},
+    group_box::{GroupBox, GroupBoxVariant, GroupBoxVariants},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
     link::Link,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
+    setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarItem as _,
         SidebarMenu, SidebarMenuItem, SidebarToggleButton,
@@ -44,9 +45,9 @@ use crate::config::{
     MIN_SLEEP_TIMER_MINUTES, SLEEP_TIMER_MINUTES_PER_DAY, SleepTimerWindow,
 };
 use crate::domain::{
-    BrowseItem, BrowseKind, BrowsePage, BrowsePlaybackEndpoint, ExplorePage, HomeChip, HomeItem,
-    HomePage, HomeSection, LyricsDocument, PlaylistEntry, RemoteHistoryEntry, RemoteHistoryPage,
-    Song,
+    BrowseItem, BrowseKind, BrowsePage, BrowsePlaybackEndpoint, ContentFilters, ExplorePage,
+    HomeChip, HomeItem, HomePage, HomeSection, LyricsDocument, PlaylistEntry, RemoteHistoryEntry,
+    RemoteHistoryPage, Song,
 };
 use crate::services::innertube::{
     AccountProfile, InnerTubeClient, InnerTubeSession, MediaInfo, PlaybackTrackingUrl,
@@ -79,6 +80,7 @@ use crate::storage::{
     PlaylistSort, PodcastSubscription, RecognitionHistoryEntry, SavedEpisode, SearchHistoryEntry,
     SongListeningStats, SortDirection,
 };
+use crate::ui::settings_nav::{settings_page_description, settings_page_title};
 use crate::ui::widgets::{
     caption_line, cover_frame, cover_play_badge, featured_card_shell, icon_ghost_button,
     list_row_shell, media_text_block, media_tile_shell, section_heading, subtitle_line, tile_row,
@@ -407,6 +409,7 @@ fn song_artist_browse_items(song: &Song) -> Vec<BrowseItem> {
                 thumbnail_url: song.thumbnail_url.clone(),
                 params: None,
                 editable: false,
+                explicit: false,
             })
         })
         .collect()
@@ -425,6 +428,7 @@ fn song_album_browse_item(song: &Song) -> Option<BrowseItem> {
         thumbnail_url: album.thumbnail_url.clone(),
         params: None,
         editable: false,
+        explicit: false,
     })
 }
 
@@ -4167,6 +4171,7 @@ impl MetrolistShell {
                         thumbnail_url: page.item.thumbnail_url.clone(),
                         params: page.item.params.clone(),
                         editable: false,
+                        explicit: false,
                     })
                 }
                 BrowseViewState::Loading(_)
@@ -4186,6 +4191,7 @@ impl MetrolistShell {
                             thumbnail_url: song.thumbnail_url.clone(),
                             params: None,
                             editable: false,
+                            explicit: false,
                         })
                 })
             });
@@ -6755,6 +6761,7 @@ impl MetrolistShell {
                         thumbnail_url: None,
                         params: None,
                         editable: false,
+                        explicit: false,
                     },
                     cx,
                 );
@@ -6770,6 +6777,7 @@ impl MetrolistShell {
                         thumbnail_url: None,
                         params: None,
                         editable: false,
+                        explicit: false,
                     },
                     cx,
                 );
@@ -6785,6 +6793,7 @@ impl MetrolistShell {
                         thumbnail_url: None,
                         params: None,
                         editable: false,
+                        explicit: false,
                     },
                     cx,
                 );
@@ -9554,7 +9563,7 @@ impl MetrolistShell {
         let SearchViewState::Loaded(result) = &self.search_state else {
             return;
         };
-        let Some(song) = result.songs.get(index).cloned() else {
+        let Some(song) = self.visible_search_result(result).songs.get(index).cloned() else {
             return;
         };
         self.play_discovery_song(song, window, cx);
@@ -10173,6 +10182,7 @@ impl MetrolistShell {
                         } else {
                             page.songs
                         };
+                        let songs = this.visible_songs(songs);
                         if songs.is_empty() {
                             if current_page_matches {
                                 this.browse_collection_action_error =
@@ -12453,9 +12463,11 @@ impl MetrolistShell {
         play_all: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let section_items = self
+            .content_filters()
+            .home_items(section.items.iter().cloned());
         let songs = Arc::new(
-            section
-                .items
+            section_items
                 .iter()
                 .filter_map(|item| match item {
                     HomeItem::Song(song) => Some(song.clone()),
@@ -12511,7 +12523,7 @@ impl MetrolistShell {
             .w_full()
             .gap_3()
             .child(header)
-            .child(tile_row().children(section.items.iter().enumerate().map(
+            .child(tile_row().children(section_items.iter().enumerate().map(
                 |(item_index, item)| match item {
                     HomeItem::Song(song) => self.render_song_tile(
                         format!("home-{section_index}-{item_index}"),
@@ -12584,7 +12596,11 @@ impl MetrolistShell {
                         .into_any_element()
                 });
                 let sections =
-                    if page.sections.is_empty() {
+                    if page.sections.iter().all(|section| {
+                        self.content_filters()
+                            .home_items(section.items.iter().cloned())
+                            .is_empty()
+                    }) {
                         div()
                             .rounded(cx.theme().radius)
                             .border_1()
@@ -12647,7 +12663,8 @@ impl MetrolistShell {
         let CloudLibraryViewState::Loaded(library) = &self.cloud_library_state else {
             return None;
         };
-        if library.playlists.is_empty() {
+        let playlists = self.visible_browse_items(library.playlists.iter().cloned());
+        if playlists.is_empty() {
             return None;
         }
         let (account_name, account_thumbnail) = match &self.account_state {
@@ -12656,7 +12673,7 @@ impl MetrolistShell {
             }
             _ => ("YouTube Music".into(), None),
         };
-        let has_more = library.playlists.len() > 12;
+        let has_more = playlists.len() > 12;
 
         Some(
             v_flex()
@@ -12700,7 +12717,7 @@ impl MetrolistShell {
                         }),
                 )
                 .child(
-                    tile_row().children(library.playlists.iter().take(12).enumerate().map(
+                    tile_row().children(playlists.iter().take(12).enumerate().map(
                         |(index, item)| {
                             self.render_browse_tile(
                                 format!("home-account-playlist-{index}"),
@@ -13311,8 +13328,13 @@ impl MetrolistShell {
                 )
                 .into_any_element(),
             ExploreFeedState::Loaded(page)
-                if page.chart_sections.is_empty()
-                    && page.new_release_albums.is_empty()
+                if page.chart_sections.iter().all(|section| {
+                    self.content_filters()
+                        .home_items(section.items.iter().cloned())
+                        .is_empty()
+                }) && self
+                    .visible_browse_items(page.new_release_albums.iter().cloned())
+                    .is_empty()
                     && page.new_releases_more.is_none()
                     && page.categories.is_empty() =>
             {
@@ -13346,8 +13368,14 @@ impl MetrolistShell {
                     )
                 })
                 .when(
-                    !page.new_release_albums.is_empty() || page.new_releases_more.is_some(),
+                    {
+                        let albums =
+                            self.visible_browse_items(page.new_release_albums.iter().cloned());
+                        !albums.is_empty() || page.new_releases_more.is_some()
+                    },
                     |layout| {
+                        let albums =
+                            self.visible_browse_items(page.new_release_albums.iter().cloned());
                         layout.child(
                             v_flex()
                                 .gap_3()
@@ -13377,17 +13405,15 @@ impl MetrolistShell {
                                             },
                                         ),
                                 )
-                                .child(tile_row().children(
-                                    page.new_release_albums.iter().enumerate().map(
-                                        |(index, album)| {
-                                            self.render_browse_tile(
-                                                format!("explore-album-{index}"),
-                                                album,
-                                                cx,
-                                            )
-                                        },
-                                    ),
-                                )),
+                                .child(tile_row().children(albums.iter().enumerate().map(
+                                    |(index, album)| {
+                                        self.render_browse_tile(
+                                            format!("explore-album-{index}"),
+                                            album,
+                                            cx,
+                                        )
+                                    },
+                                ))),
                         )
                     },
                 )
@@ -13734,7 +13760,7 @@ impl MetrolistShell {
                                 .child("Recommended tracks"),
                         )
                     })
-                    .children(suggestions.songs.iter().enumerate().map(|(index, song)| {
+                    .children(self.visible_songs(suggestions.songs.iter().cloned()).iter().enumerate().map(|(index, song)| {
                         let selected = song.clone();
                         list_row_shell(
                             SharedString::from(format!("search-recommendation-{index}")),
@@ -13813,6 +13839,24 @@ impl MetrolistShell {
                     .into_any_element(),
             ),
         }
+    }
+
+    fn render_filtered_listing_empty(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_h(px(260.))
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(Icon::new(IconName::Search).size_8())
+            .child(div().font_semibold().child(title))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Hidden by Content Settings filters."),
+            )
+            .into_any_element()
     }
 
     fn render_search_results(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -13911,6 +13955,13 @@ impl MetrolistShell {
                 if self.search_filter != SearchFilter::All
                     && self.search_filter.returns_songs() =>
             {
+                let result = self.visible_search_result(result);
+                if result.songs.is_empty() {
+                    return self.render_filtered_listing_empty(
+                        format!("No {} found", self.search_filter.label().to_lowercase()),
+                        cx,
+                    );
+                }
                 let pagination = self.render_search_pagination(result.continuation.is_some(), cx);
                 v_flex()
                     .gap_2()
@@ -13935,6 +13986,13 @@ impl MetrolistShell {
                     .into_any_element()
             }
             SearchViewState::Loaded(result) if self.search_filter == SearchFilter::All => {
+                let result = self.visible_search_result(result);
+                if result.songs.is_empty() && result.items.is_empty() {
+                    return self.render_filtered_listing_empty(
+                        format!("No {} found", self.search_filter.label().to_lowercase()),
+                        cx,
+                    );
+                }
                 let pagination = self.render_search_pagination(result.continuation.is_some(), cx);
                 v_flex()
                     .gap_2()
@@ -13966,6 +14024,13 @@ impl MetrolistShell {
                     .into_any_element()
             }
             SearchViewState::Loaded(result) => {
+                let result = self.visible_search_result(result);
+                if result.items.is_empty() {
+                    return self.render_filtered_listing_empty(
+                        format!("No {} found", self.search_filter.label().to_lowercase()),
+                        cx,
+                    );
+                }
                 let pagination = self.render_search_pagination(result.continuation.is_some(), cx);
                 v_flex()
                     .gap_2()
@@ -15183,6 +15248,7 @@ impl MetrolistShell {
                 thumbnail_url: None,
                 params: None,
                 editable: false,
+                explicit: false,
             }
         });
         let account_ready = self.account_ready();
@@ -15777,14 +15843,14 @@ impl MetrolistShell {
                 let _is_collection =
                     matches!(page.item.kind, BrowseKind::Album | BrowseKind::Playlist);
                 let editable_entries = page.item.editable && !page.playlist_entries.is_empty();
-                let all_songs = if editable_entries {
+                let all_songs = self.visible_songs(if editable_entries {
                     page.playlist_entries
                         .iter()
                         .map(|entry| entry.song.clone())
                         .collect()
                 } else {
                     page.songs.clone()
-                };
+                });
                 let total_song_count = all_songs.len();
                 let podcast_query = if is_podcast {
                     self.podcast_episode_search_input
@@ -15857,7 +15923,8 @@ impl MetrolistShell {
                             }))
                             .into_any_element()
                     };
-                let related = (!page.related.is_empty()).then(|| {
+                let related_items = self.visible_browse_items(page.related.iter().cloned());
+                let related = (!related_items.is_empty()).then(|| {
                     v_flex()
                         .gap_2()
                         .child(section_heading(
@@ -15870,7 +15937,7 @@ impl MetrolistShell {
                             cx,
                         ))
                         .children(
-                            page.related
+                            related_items
                                 .iter()
                                 .enumerate()
                                 .map(|(index, item)| self.render_browse_item_row(index, item, cx)),
@@ -16142,7 +16209,7 @@ impl MetrolistShell {
                 add_song(song);
             }
         }
-        songs
+        self.visible_songs(songs)
     }
 
     fn local_song_catalog_items(&self) -> Vec<BrowseItem> {
@@ -16165,6 +16232,7 @@ impl MetrolistShell {
                         .or_else(|| song.thumbnail_url.clone()),
                     params: None,
                     editable: false,
+                    explicit: false,
                 });
             }
             for artist in &song.artists {
@@ -16180,6 +16248,7 @@ impl MetrolistShell {
                         thumbnail_url: song.thumbnail_url.clone(),
                         params: None,
                         editable: false,
+                        explicit: false,
                     });
                 }
             }
@@ -16942,6 +17011,7 @@ impl MetrolistShell {
                                         thumbnail_url: None,
                                         params: None,
                                         editable: false,
+                                        explicit: false,
                                     });
                                     list_row_shell(
                                         SharedString::from(format!("stats-artist-{index}")),
@@ -17006,6 +17076,7 @@ impl MetrolistShell {
                                         thumbnail_url: album.thumbnail_url.clone(),
                                         params: None,
                                         editable: false,
+                                        explicit: false,
                                     };
                                     list_row_shell(
                                         SharedString::from(format!("stats-album-{index}")),
@@ -17260,6 +17331,9 @@ impl MetrolistShell {
         if !query.is_empty() {
             let mut seen = HashSet::new();
             let mut add_song = |song: &Song| {
+                if !self.content_filters().keep_song(song) {
+                    return;
+                }
                 let matches = song.title.to_lowercase().contains(&query)
                     || song
                         .artists
@@ -17290,6 +17364,9 @@ impl MetrolistShell {
 
         let mut seen_browse = HashSet::new();
         let mut add_browse = |item: &BrowseItem| {
+            if !self.content_filters().keep_browse_item(item) {
+                return;
+            }
             let matches = query.is_empty()
                 || item.title.to_lowercase().contains(&query)
                 || item.subtitle.to_lowercase().contains(&query);
@@ -19386,23 +19463,24 @@ impl MetrolistShell {
                 })
                 .into_any_element(),
             CloudLibraryViewState::Loaded(library) => {
-                let songs = Arc::new(library.liked_songs.clone());
+                let songs = Arc::new(self.visible_songs(library.liked_songs.iter().cloned()));
                 let play_all = songs.clone();
                 let playlist_query = if selected_tab == LibraryTab::Playlists {
                     self.library_playlist_query.trim().to_lowercase()
                 } else {
                     String::new()
                 };
-                let visible_playlists = library
-                    .playlists
-                    .iter()
-                    .filter(|playlist| {
-                        playlist_query.is_empty()
-                            || playlist.title.to_lowercase().contains(&playlist_query)
-                            || playlist.subtitle.to_lowercase().contains(&playlist_query)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let visible_playlists = self.visible_browse_items(
+                    library
+                        .playlists
+                        .iter()
+                        .filter(|playlist| {
+                            playlist_query.is_empty()
+                                || playlist.title.to_lowercase().contains(&playlist_query)
+                                || playlist.subtitle.to_lowercase().contains(&playlist_query)
+                        })
+                        .cloned(),
+                );
                 v_flex()
                     .gap_5()
                     .child(
@@ -20343,6 +20421,7 @@ impl MetrolistShell {
                         thumbnail_url: podcast.thumbnail_url.clone(),
                         params: None,
                         editable: false,
+                        explicit: false,
                     };
                     let open_item = item.clone();
                     let remove_item = item;
@@ -20467,6 +20546,7 @@ impl MetrolistShell {
                             thumbnail_url: podcast.thumbnail_url.clone(),
                             params: None,
                             editable: false,
+                            explicit: false,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -20598,6 +20678,7 @@ impl MetrolistShell {
                     thumbnail_url: None,
                     params: None,
                     editable: false,
+                    explicit: false,
                 };
                 let remote_saved = BrowseItem {
                     browse_id: "SE".into(),
@@ -20607,6 +20688,7 @@ impl MetrolistShell {
                     thumbnail_url: None,
                     params: None,
                     editable: false,
+                    explicit: false,
                 };
                 v_flex()
                     .gap_3()
@@ -20788,6 +20870,7 @@ impl MetrolistShell {
         } else {
             HashMap::new()
         };
+        songs = self.visible_songs(songs);
         match self.library_song_sort {
             LibrarySongSort::Recent => {
                 if self.library_song_sort_direction == SortDirection::Ascending {
@@ -20911,7 +20994,7 @@ impl MetrolistShell {
                 });
             }
         }
-        items
+        self.visible_browse_items(items)
     }
 
     fn render_library_catalog(&self, kind: BrowseKind, cx: &mut Context<Self>) -> AnyElement {
@@ -21577,32 +21660,16 @@ impl MetrolistShell {
 
         v_flex()
             .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
+            .w_full()
             .child(
                 h_flex()
                     .w_full()
                     .items_center()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(div().font_semibold().child("Audio output"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        "Choose where music plays. Switching preserves the current track and position.",
-                                    ),
-                            ),
-                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new("refresh-audio-outputs")
+                            .ghost()
+                            .compact()
                             .label("Refresh")
                             .loading(refreshing)
                             .disabled(switching)
@@ -21612,15 +21679,7 @@ impl MetrolistShell {
                     ),
             )
             .when_some(snapshot.error, |card, message| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .child(message),
-                )
+                card.child(Alert::error("audio-output-error", message).small())
             })
             .when(snapshot.devices.is_empty(), |card| {
                 card.child(
@@ -21635,38 +21694,42 @@ impl MetrolistShell {
                 )
             })
             .when(!snapshot.devices.is_empty(), |card| {
-                card.child(v_flex().max_h(px(320.)).overflow_y_scrollbar().gap_2().children(
-                    snapshot
-                        .devices
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, device)| {
-                            let is_selected = selected_id.as_deref() == Some(device.id.as_str());
-                            let device_id = device.id.clone();
-                            let label = if device.is_default {
-                                format!("{} · System default", device.name)
-                            } else {
-                                device.name
-                            };
-                            Button::new(format!("audio-output-{index}"))
-                                .w_full()
-                                .justify_start()
-                                .label(label)
-                                .tooltip(device.id)
-                                .selected(is_selected)
-                                .disabled(busy || is_selected)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_audio_output(device_id.clone(), cx);
-                                }))
-                        }),
-                ))
+                card.child(
+                    v_flex()
+                        .max_h(px(320.))
+                        .overflow_y_scrollbar()
+                        .gap_2()
+                        .children(snapshot.devices.into_iter().enumerate().map(
+                            |(index, device)| {
+                                let is_selected =
+                                    selected_id.as_deref() == Some(device.id.as_str());
+                                let device_id = device.id.clone();
+                                let label = if device.is_default {
+                                    format!("{} · System default", device.name)
+                                } else {
+                                    device.name
+                                };
+                                Button::new(format!("audio-output-{index}"))
+                                    .w_full()
+                                    .justify_start()
+                                    .label(label)
+                                    .tooltip(device.id)
+                                    .selected(is_selected)
+                                    .disabled(busy || is_selected)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_audio_output(device_id.clone(), cx);
+                                    }))
+                            },
+                        )),
+                )
             })
             .when(switching, |card| {
                 card.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Switching output and restoring playback…"),
+                    Alert::info(
+                        "audio-output-switching",
+                        "Switching output and restoring playback…",
+                    )
+                    .small(),
                 )
             })
             .into_any_element()
@@ -21729,23 +21792,16 @@ impl MetrolistShell {
                     )
                     .into_any_element()
             }
-            AccountViewState::Expired(error) => v_flex()
-                .gap_1()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().warning.opacity(0.12))
-                .text_color(cx.theme().warning)
-                .p_3()
-                .text_sm()
-                .child("The saved session is no longer accepted. Cloud likes, playlists, subscriptions, and YouTube Music history sync are paused; anonymous search and playback remain available.")
-                .child(error.clone())
-                .into_any_element(),
-            AccountViewState::Failed(error) => div()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().danger.opacity(0.12))
-                .text_color(cx.theme().danger)
-                .p_3()
-                .text_sm()
-                .child(error.clone())
+            AccountViewState::Expired(error) => Alert::warning(
+                "account-expired",
+                format!(
+                    "Session expired. Cloud likes, playlists, and history sync are paused. {error}"
+                ),
+            )
+            .small()
+            .into_any_element(),
+            AccountViewState::Failed(error) => Alert::error("account-failed", error.clone())
+                .small()
                 .into_any_element(),
         };
         let import_label = match self.account_operation {
@@ -21767,48 +21823,14 @@ impl MetrolistShell {
         };
 
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("YouTube Music account"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "Account sessions are stored only in {}—never in Metrolist's SQLite database or logs.",
-                                self.credential_store.backend_label()
-                            )),
-                    ),
-            )
+            .gap_3()
+            .w_full()
             .child(status)
             .when_some(self.account_error.clone(), |card, error| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(error),
-                )
+                card.child(Alert::error("account-error", error).small())
             })
             .when_some(self.credential_warning.clone(), |card, warning| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .p_3()
-                        .text_sm()
-                        .child(warning),
-                )
+                card.child(Alert::warning("account-credential-warning", warning).small())
             })
             .child(
                 v_flex()
@@ -21816,6 +21838,7 @@ impl MetrolistShell {
                     .child(
                         Button::new("account-sign-in")
                             .primary()
+                            .compact()
                             .label(sign_in_label)
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -21826,7 +21849,10 @@ impl MetrolistShell {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Opens an isolated system WebView. Metrolist reads the resulting YouTube Music session only after Google redirects back to music.youtube.com, then verifies the account before saving it."),
+                            .child(format!(
+                                "Opens a system WebView. The session is stored only in {}.",
+                                self.credential_store.backend_label()
+                            )),
                     ),
             )
             .child(
@@ -21858,6 +21884,7 @@ impl MetrolistShell {
                     .flex_wrap()
                     .child(
                         Button::new("account-import")
+                            .compact()
                             .label(import_label)
                             .disabled(busy || input_empty)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -21873,6 +21900,8 @@ impl MetrolistShell {
                         |buttons| {
                             buttons.child(
                                 Button::new("account-retry")
+                                    .ghost()
+                                    .compact()
                                     .label("Retry verification")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -21885,6 +21914,7 @@ impl MetrolistShell {
                         buttons.child(
                             Button::new("account-sign-out")
                                 .danger()
+                                .compact()
                                 .label(if self.account_operation == AccountOperation::SigningOut {
                                     "Signing out…"
                                 } else if matches!(
@@ -21916,7 +21946,6 @@ impl MetrolistShell {
             .trim()
             .is_empty();
         let password_empty = self.lastfm_password_input.read(cx).value().is_empty();
-        let policy = self.settings_draft.lastfm_scrobble_policy;
         let operation_label = match self.lastfm_operation {
             LastFmOperation::Idle if signed_in => "Sign in and replace",
             LastFmOperation::Idle => "Sign in",
@@ -21925,84 +21954,41 @@ impl MetrolistShell {
         };
 
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
+            .gap_3()
+            .w_full()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Last.fm"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "The session key is stored only in {}. Your password is sent once over HTTPS for Last.fm mobile-session authentication, then immediately cleared and never saved.",
-                                self.lastfm_credential_store.backend_label()
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(if signed_in {
-                        cx.theme().success
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .child(
-                        self.lastfm_session
-                            .as_ref()
-                            .map(|session| format!("Signed in as {}", session.username()))
-                            .unwrap_or_else(|| "Not signed in".into()),
-                    ),
+                if let Some(session) = self.lastfm_session.as_ref() {
+                    Alert::success(
+                        "lastfm-signed-in",
+                        format!("Signed in as {}", session.username()),
+                    )
+                    .small()
+                    .into_any_element()
+                } else {
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Not signed in.")
+                        .into_any_element()
+                },
             )
             .when(!configured, |card| {
                 card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .p_3()
-                        .text_sm()
-                        .child("Last.fm is optional. To enable it, set LASTFM_API_KEY and LASTFM_SHARED_SECRET (or the Android-compatible LASTFM_SECRET) before starting Metrolist."),
+                    Alert::warning(
+                        "lastfm-unconfigured",
+                        "Set LASTFM_API_KEY and LASTFM_SHARED_SECRET (or LASTFM_SECRET) before starting Metrolist.",
+                    )
+                    .small(),
                 )
             })
             .when_some(self.lastfm_warning.clone(), |card, warning| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .p_3()
-                        .text_sm()
-                        .child(warning),
-                )
+                card.child(Alert::warning("lastfm-warning", warning).small())
             })
             .when_some(self.lastfm_error.clone(), |card, error| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(error),
-                )
+                card.child(Alert::error("lastfm-error", error).small())
             })
             .when_some(self.lastfm_notice.clone(), |card, notice| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().success.opacity(0.12))
-                        .text_color(cx.theme().success)
-                        .p_3()
-                        .text_sm()
-                        .child(notice),
-                )
+                card.child(Alert::success("lastfm-notice", notice).small())
             })
             .child(
                 v_flex()
@@ -22022,6 +22008,7 @@ impl MetrolistShell {
                     .child(
                         Button::new("lastfm-sign-in")
                             .primary()
+                            .compact()
                             .label(operation_label)
                             .disabled(busy || !configured || username_empty || password_empty)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -22032,6 +22019,7 @@ impl MetrolistShell {
                         buttons.child(
                             Button::new("lastfm-sign-out")
                                 .danger()
+                                .compact()
                                 .label(if self.lastfm_operation == LastFmOperation::SigningOut {
                                     "Signing out…"
                                 } else {
@@ -22044,185 +22032,22 @@ impl MetrolistShell {
                         )
                     }),
             )
-            .child(div().text_sm().font_medium().child("Activity sync"))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        Button::new("lastfm-scrobbling")
-                            .label("Scrobble")
-                            .selected(self.settings_draft.lastfm_scrobbling)
-                            .disabled(busy || !configured || !signed_in)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobbling =
-                                    !this.settings_draft.lastfm_scrobbling;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-now-playing")
-                            .label("Now Playing")
-                            .selected(self.settings_draft.lastfm_now_playing)
-                            .disabled(busy || !configured || !signed_in)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_now_playing =
-                                    !this.settings_draft.lastfm_now_playing;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-sync-likes")
-                            .label("Sync likes")
-                            .selected(self.settings_draft.lastfm_sync_likes)
-                            .disabled(busy || !configured || !signed_in)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_sync_likes =
-                                    !this.settings_draft.lastfm_sync_likes;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Scrobble after the earlier of the configured played percentage or maximum delay. Paused time is excluded; tracks at or below the minimum duration are ignored."),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(px(180.)).text_sm().child(format!(
-                        "Minimum track: {} s",
-                        policy.min_track_seconds
-                    )))
-                    .child(
-                        Button::new("lastfm-min-duration-down")
-                            .ghost()
-                            .label("−")
-                            .disabled(busy || policy.min_track_seconds <= 10)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.min_track_seconds = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .min_track_seconds
-                                    .saturating_sub(5)
-                                    .max(10);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-min-duration-up")
-                            .ghost()
-                            .label("+")
-                            .disabled(busy || policy.min_track_seconds >= 60)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.min_track_seconds = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .min_track_seconds
-                                    .saturating_add(5)
-                                    .min(60);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(px(180.)).text_sm().child(format!(
-                        "Played percentage: {}%",
-                        policy.delay_percent_milli / 10
-                    )))
-                    .child(
-                        Button::new("lastfm-percent-down")
-                            .ghost()
-                            .label("−")
-                            .disabled(busy || policy.delay_percent_milli <= 300)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.delay_percent_milli = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .delay_percent_milli
-                                    .saturating_sub(50)
-                                    .max(300);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-percent-up")
-                            .ghost()
-                            .label("+")
-                            .disabled(busy || policy.delay_percent_milli >= 950)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.delay_percent_milli = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .delay_percent_milli
-                                    .saturating_add(50)
-                                    .min(950);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(px(180.)).text_sm().child(format!(
-                        "Maximum delay: {} s",
-                        policy.max_delay_seconds
-                    )))
-                    .child(
-                        Button::new("lastfm-max-delay-down")
-                            .ghost()
-                            .label("−")
-                            .disabled(busy || policy.max_delay_seconds <= 30)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.max_delay_seconds = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .max_delay_seconds
-                                    .saturating_sub(30)
-                                    .max(30);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-max-delay-up")
-                            .ghost()
-                            .label("+")
-                            .disabled(busy || policy.max_delay_seconds >= 360)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy.max_delay_seconds = this
-                                    .settings_draft
-                                    .lastfm_scrobble_policy
-                                    .max_delay_seconds
-                                    .saturating_add(30)
-                                    .min(360);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("lastfm-policy-reset")
-                            .label("Android defaults")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.lastfm_scrobble_policy = Default::default();
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .into_any_element()
+    }
+
+    fn render_lastfm_policy_reset(&self, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.lastfm_busy();
+        Button::new("lastfm-policy-reset")
+            .ghost()
+            .compact()
+            .label("Android defaults")
+            .disabled(busy)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings_draft.lastfm_scrobble_policy = Default::default();
+                this.settings_error = None;
+                this.settings_notice = None;
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -22233,63 +22058,20 @@ impl MetrolistShell {
     ) -> AnyElement {
         let parameters = self.settings_draft.playback_parameters;
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
+            .gap_3()
+            .w_full()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Playback speed and pitch"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Normal mode changes tempo without changing pitch and allows ±12 semitones. Varispeed links pitch to speed like tape playback. Save below to rebuild the audio chain at the current song position."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("playback-mode-normal")
-                            .label("Normal")
-                            .selected(!parameters.varispeed)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.playback_parameters.varispeed = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("playback-mode-varispeed")
-                            .label("Varispeed")
-                            .selected(parameters.varispeed)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.playback_parameters.varispeed = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("playback-parameters-reset")
-                            .ghost()
-                            .label("Reset")
-                            .disabled(busy || parameters == PlaybackParameters::default())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.playback_parameters =
-                                    PlaybackParameters::default();
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
+                Button::new("playback-parameters-reset")
+                    .ghost()
+                    .compact()
+                    .label("Reset speed and pitch")
+                    .disabled(busy || parameters == PlaybackParameters::default())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_draft.playback_parameters = PlaybackParameters::default();
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    })),
             )
             .child(
                 h_flex()
@@ -22299,6 +22081,7 @@ impl MetrolistShell {
                     .child(
                         Button::new("playback-speed-down")
                             .ghost()
+                            .compact()
                             .label("−")
                             .disabled(busy || parameters.tempo_milli <= MIN_PLAYBACK_RATE_MILLI)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -22322,6 +22105,7 @@ impl MetrolistShell {
                     .child(
                         Button::new("playback-speed-up")
                             .ghost()
+                            .compact()
                             .label("+")
                             .disabled(busy || parameters.tempo_milli >= MAX_PLAYBACK_RATE_MILLI)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -22345,15 +22129,14 @@ impl MetrolistShell {
                         .child(
                             Button::new("playback-transpose-down")
                                 .ghost()
+                                .compact()
                                 .label("−")
                                 .disabled(
-                                    busy
-                                        || parameters.transpose_semitones
-                                            <= MIN_TRANSPOSE_SEMITONES,
+                                    busy || parameters.transpose_semitones
+                                        <= MIN_TRANSPOSE_SEMITONES,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    let parameters =
-                                        &mut this.settings_draft.playback_parameters;
+                                    let parameters = &mut this.settings_draft.playback_parameters;
                                     parameters.transpose_semitones = parameters
                                         .transpose_semitones
                                         .saturating_sub(1)
@@ -22373,15 +22156,14 @@ impl MetrolistShell {
                         .child(
                             Button::new("playback-transpose-up")
                                 .ghost()
+                                .compact()
                                 .label("+")
                                 .disabled(
-                                    busy
-                                        || parameters.transpose_semitones
-                                            >= MAX_TRANSPOSE_SEMITONES,
+                                    busy || parameters.transpose_semitones
+                                        >= MAX_TRANSPOSE_SEMITONES,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    let parameters =
-                                        &mut this.settings_draft.playback_parameters;
+                                    let parameters = &mut this.settings_draft.playback_parameters;
                                     parameters.transpose_semitones = parameters
                                         .transpose_semitones
                                         .saturating_add(1)
@@ -22420,78 +22202,28 @@ impl MetrolistShell {
             }
         };
 
+        let _ = busy;
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
+            .gap_3()
+            .w_full()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Discord Rich Presence"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Opt in to publish the current title, artists, artwork, playback timer, and two public links to the Discord desktop client on this computer. Metrolist uses local IPC without a Discord token, OAuth login, or Gateway connection."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("discord-rich-presence-on")
-                            .label("Share activity")
-                            .selected(self.settings_draft.discord_rich_presence)
-                            .disabled(busy || self.discord_presence.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.discord_rich_presence = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("discord-rich-presence-off")
-                            .label("Keep private")
-                            .selected(!self.settings_draft.discord_rich_presence)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.discord_rich_presence = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(match snapshot.as_ref().map(|snapshot| snapshot.state) {
-                        Some(DiscordPresenceState::Active) => cx.theme().success,
-                        Some(DiscordPresenceState::Failed) => cx.theme().warning,
-                        _ => cx.theme().muted_foreground,
-                    })
-                    .child(status),
+                if matches!(
+                    snapshot.as_ref().map(|snapshot| snapshot.state),
+                    Some(DiscordPresenceState::Failed)
+                ) {
+                    Alert::warning("discord-status", status).small()
+                } else {
+                    Alert::info("discord-status", status).small()
+                },
             )
             .when_some(self.discord_warning.clone(), |card, warning| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .p_3()
-                        .text_sm()
-                        .child(warning),
-                )
+                card.child(Alert::warning("discord-warning", warning).small())
             })
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Pausing removes the live timer; after one minute paused, Metrolist clears the activity. If Discord is unavailable, playback continues normally and the connection is retried later."),
+                    .child("Pause clears the live timer; after one minute paused the activity is removed."),
             )
             .into_any_element()
     }
@@ -22529,32 +22261,9 @@ impl MetrolistShell {
                 .clone()
                 .unwrap_or_else(|| "Connection failed".into()),
         };
-        let status_color = match snapshot.connection {
-            ListenTogetherConnectionState::Connected => cx.theme().success,
-            ListenTogetherConnectionState::Error => cx.theme().danger,
-            ListenTogetherConnectionState::Connecting
-            | ListenTogetherConnectionState::Reconnecting { .. } => cx.theme().warning,
-            ListenTogetherConnectionState::Disconnected => cx.theme().muted_foreground,
-        };
-
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Listen Together"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Create or join an eight-character room and keep playback, queue, position, and optionally volume synchronized. The selected room server receives song metadata and timing, but never YouTube cookies, playback URLs, cache contents, or audio bytes."),
-                    ),
-            )
+            .gap_3()
+            .w_full()
             .child(
                 v_flex()
                     .gap_1()
@@ -22598,6 +22307,7 @@ impl MetrolistShell {
                         row.child(
                             Button::new("listen-together-create")
                                 .primary()
+                                .compact()
                                 .label(if connecting { "Connecting…" } else { "Create room" })
                                 .disabled(busy || unavailable || connecting || username_empty)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -22606,6 +22316,7 @@ impl MetrolistShell {
                         )
                         .child(
                             Button::new("listen-together-join")
+                                .compact()
                                 .label(if connecting { "Connecting…" } else { "Join room" })
                                 .disabled(
                                     busy
@@ -22623,6 +22334,7 @@ impl MetrolistShell {
                         row.child(
                             Button::new("listen-together-connect")
                                 .ghost()
+                                .compact()
                                 .label("Test connection")
                                 .disabled(busy || unavailable || connecting)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -22634,6 +22346,7 @@ impl MetrolistShell {
                         row.child(
                             Button::new("listen-together-disconnect")
                                 .ghost()
+                                .compact()
                                 .label("Disconnect")
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -22645,6 +22358,7 @@ impl MetrolistShell {
                         row.child(
                             Button::new("listen-together-leave")
                                 .danger()
+                                .compact()
                                 .label("Leave room")
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -22653,7 +22367,21 @@ impl MetrolistShell {
                         )
                     }),
             )
-            .child(div().text_sm().text_color(status_color).child(status))
+            .child(match snapshot.connection {
+                ListenTogetherConnectionState::Error => {
+                    Alert::error("listen-together-status", status).small()
+                }
+                ListenTogetherConnectionState::Connecting
+                | ListenTogetherConnectionState::Reconnecting { .. } => {
+                    Alert::warning("listen-together-status", status).small()
+                }
+                ListenTogetherConnectionState::Connected => {
+                    Alert::success("listen-together-status", status).small()
+                }
+                ListenTogetherConnectionState::Disconnected => {
+                    Alert::info("listen-together-status", status).small()
+                }
+            })
             .when_some(snapshot.room.clone(), |card, room| {
                 let local_user_id = snapshot.user_id.clone();
                 let is_host = snapshot.role == ListenTogetherRoomRole::Host;
@@ -22996,88 +22724,14 @@ impl MetrolistShell {
                     )
                 },
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        Button::new("listen-together-auto-joins")
-                            .label("Auto-approve joins")
-                            .selected(self.settings_draft.listen_together.auto_approve_joins)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let value =
-                                    &mut this.settings_draft.listen_together.auto_approve_joins;
-                                *value = !*value;
-                                this.settings_error = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("listen-together-auto-suggestions")
-                            .label("Auto-approve suggestions")
-                            .selected(
-                                self.settings_draft
-                                    .listen_together
-                                    .auto_approve_suggestions,
-                            )
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let value = &mut this
-                                    .settings_draft
-                                    .listen_together
-                                    .auto_approve_suggestions;
-                                *value = !*value;
-                                this.settings_error = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("listen-together-sync-volume")
-                            .label("Sync host volume")
-                            .selected(self.settings_draft.listen_together.sync_host_volume)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let value =
-                                    &mut this.settings_draft.listen_together.sync_host_volume;
-                                *value = !*value;
-                                this.settings_error = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
             .when_some(self.listen_together_notice.clone(), |card, notice| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().success.opacity(0.1))
-                        .text_color(cx.theme().success)
-                        .p_3()
-                        .text_sm()
-                        .child(notice),
-                )
+                card.child(Alert::success("listen-together-notice", notice).small())
             })
             .when_some(self.listen_together_error.clone(), |card, error| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.1))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(error),
-                )
+                card.child(Alert::error("listen-together-error", error).small())
             })
             .when_some(self.listen_together_warning.clone(), |card, warning| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .p_3()
-                        .text_sm()
-                        .child(warning),
-                )
+                card.child(Alert::warning("listen-together-warning", warning).small())
             })
             .child(
                 div()
@@ -23118,22 +22772,15 @@ impl MetrolistShell {
                 .into_any_element(),
             AutoEqDatabaseState::Loading => h_flex()
                 .gap_2()
+                .items_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(Icon::new(IconName::LoaderCircle))
+                .child(Spinner::new())
                 .child("Loading and indexing the AutoEQ database…")
                 .into_any_element(),
             AutoEqDatabaseState::Failed { message, cached } => v_flex()
                 .gap_2()
-                .child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.1))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(message.clone()),
-                )
+                .child(Alert::error("autoeq-database-failed", message.clone()).small())
                 .when(*cached, |state| {
                     state.child(
                         div()
@@ -23167,15 +22814,12 @@ impl MetrolistShell {
                 let body = match self.autoeq_wizard_step {
                     AutoEqWizardStep::ModelSelection => {
                         let models = if self.autoeq_models.is_empty() {
-                            div()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .p_3()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No matching models. Try a shorter model name.")
-                                .into_any_element()
+                            Alert::info(
+                                "autoeq-models-empty",
+                                "No matching models. Try a shorter model name.",
+                            )
+                            .small()
+                            .into_any_element()
                         } else {
                             v_flex()
                                 .max_h(px(300.))
@@ -23330,25 +22974,22 @@ impl MetrolistShell {
                 };
                 v_flex()
                     .gap_2()
-                    .child(
+                    .child(if index.origin == AutoEqIndexOrigin::StaleCache {
+                        Alert::warning("autoeq-stale-cache", status).small().into_any_element()
+                    } else {
                         div()
                             .text_xs()
-                            .text_color(if index.origin == AutoEqIndexOrigin::StaleCache {
-                                cx.theme().warning
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(status),
-                    )
+                            .text_color(cx.theme().muted_foreground)
+                            .child(status)
+                            .into_any_element()
+                    })
                     .when(index.truncated, |state| {
                         state.child(
-                            div()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().warning.opacity(0.1))
-                                .text_color(cx.theme().warning)
-                                .p_2()
-                                .text_xs()
-                                .child("GitHub marked this tree response as truncated, so some models may be absent."),
+                            Alert::warning(
+                                "autoeq-database-truncated",
+                                "GitHub marked this tree response as truncated, so some models may be absent.",
+                            )
+                            .small(),
                         )
                     })
                     .child(body)
@@ -23358,11 +22999,13 @@ impl MetrolistShell {
 
         v_flex()
             .gap_2()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_3()
-            .child(div().font_medium().child("Online AutoEQ database"))
+            .w_full()
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .child("Online AutoEQ database"),
+            )
             .child(content)
             .into_any_element()
     }
@@ -23554,12 +23197,7 @@ impl MetrolistShell {
                 .into_any_element(),
             StoredViewState::Failed(error) => v_flex()
                 .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(error.clone()),
-                )
+                .child(Alert::error("equalizer-profiles-failed", error.clone()).small())
                 .child(
                     Button::new("equalizer-profiles-retry")
                         .label("Retry")
@@ -23569,15 +23207,12 @@ impl MetrolistShell {
                         })),
                 )
                 .into_any_element(),
-            StoredViewState::Loaded(profiles) if profiles.is_empty() => div()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .p_3()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No imported profiles yet. AutoEQ ParametricEQ.txt and Equalizer APO text files are supported.")
-                .into_any_element(),
+            StoredViewState::Loaded(profiles) if profiles.is_empty() => Alert::info(
+                "equalizer-profiles-empty",
+                "No imported profiles yet. AutoEQ ParametricEQ.txt and Equalizer APO text files are supported.",
+            )
+            .small()
+            .into_any_element(),
             StoredViewState::Loaded(profiles) => v_flex()
                 .gap_2()
                 .children(profiles.iter().cloned().enumerate().map(|(index, profile)| {
@@ -23669,40 +23304,46 @@ impl MetrolistShell {
                         )
                         .when(confirming, |row| {
                             row.child(
-                                h_flex()
+                                v_flex()
                                     .gap_2()
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .text_color(cx.theme().warning)
-                                            .child("Delete this saved profile permanently?"),
+                                        Alert::warning(
+                                            format!("equalizer-profile-delete-confirm-alert-{index}"),
+                                            "Delete this saved profile permanently?",
+                                        )
+                                        .small(),
                                     )
                                     .child(
-                                        Button::new(format!(
-                                            "equalizer-profile-delete-confirm-{index}"
-                                        ))
-                                        .label("Confirm delete")
-                                        .danger()
-                                        .disabled(busy)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.delete_equalizer_profile(
-                                                confirm_delete_id.clone(),
-                                                cx,
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new(format!(
+                                                    "equalizer-profile-delete-confirm-{index}"
+                                                ))
+                                                .label("Confirm delete")
+                                                .danger()
+                                                .compact()
+                                                .disabled(busy)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.delete_equalizer_profile(
+                                                        confirm_delete_id.clone(),
+                                                        cx,
+                                                    )
+                                                })),
                                             )
-                                        })),
-                                    )
-                                    .child(
-                                        Button::new(format!(
-                                            "equalizer-profile-delete-cancel-{index}"
-                                        ))
-                                        .label("Cancel")
-                                        .ghost()
-                                        .disabled(busy)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.equalizer_delete_confirmation = None;
-                                            cx.notify();
-                                        })),
+                                            .child(
+                                                Button::new(format!(
+                                                    "equalizer-profile-delete-cancel-{index}"
+                                                ))
+                                                .label("Cancel")
+                                                .ghost()
+                                                .compact()
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.equalizer_delete_confirmation = None;
+                                                    cx.notify();
+                                                })),
+                                            ),
                                     ),
                             )
                         })
@@ -23712,9 +23353,7 @@ impl MetrolistShell {
 
         v_flex()
             .gap_3()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().muted.opacity(0.2))
-            .p_3()
+            .w_full()
             .child(
                 h_flex()
                     .gap_3()
@@ -23722,17 +23361,19 @@ impl MetrolistShell {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().font_medium().child("AutoEQ / Equalizer APO"))
+                            .min_w_0()
+                            .child(div().text_sm().font_medium().child("Imported profiles"))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Import up to 20 enabled PK, LSC, and HSC filters. Profile selection applies and saves immediately."),
+                                    .child("Import up to 20 enabled PK, LSC, and HSC filters. Selecting a profile applies and saves immediately."),
                             ),
                     )
                     .child(
                         Button::new("equalizer-profile-import")
                             .icon(IconName::FolderOpen)
+                            .compact()
                             .label("Import file")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -23744,6 +23385,7 @@ impl MetrolistShell {
             .child(self.render_auto_eq_wizard(busy, cx))
             .child(
                 Button::new("equalizer-profile-disable")
+                    .compact()
                     .label("No equalization")
                     .selected(!self.settings.equalizer.enabled)
                     .disabled(busy || !self.settings.equalizer.enabled)
@@ -23752,35 +23394,14 @@ impl MetrolistShell {
                     })),
             )
             .when_some(operation, |card, operation| {
-                card.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(operation),
-                )
+                card.child(Alert::info("equalizer-operation", operation).small())
             })
             .child(profiles)
             .when_some(self.equalizer_notice.clone(), |card, notice| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().success.opacity(0.1))
-                        .text_color(cx.theme().success)
-                        .p_3()
-                        .text_sm()
-                        .child(notice),
-                )
+                card.child(Alert::success("equalizer-notice", notice).small())
             })
             .when_some(self.equalizer_error.clone(), |card, error| {
-                card.child(
-                    div()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.1))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(error),
-                )
+                card.child(Alert::error("equalizer-error", error).small())
             })
             .into_any_element()
     }
@@ -23871,6 +23492,8 @@ impl MetrolistShell {
                         .flex_wrap()
                         .child(
                             Button::new(format!("automatic-sleep-day-{day}"))
+                                .ghost()
+                                .compact()
                                 .label(*name)
                                 .selected(day_enabled)
                                 .disabled(busy)
@@ -23880,7 +23503,9 @@ impl MetrolistShell {
                         )
                         .child(
                             Button::new(format!("automatic-sleep-start-minus-{day}"))
-                                .label("start − 30 min")
+                                .ghost()
+                                .compact()
+                                .label("start −")
                                 .disabled(busy || !day_enabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.adjust_automatic_sleep_timer_window(day, true, -30, cx);
@@ -23894,7 +23519,9 @@ impl MetrolistShell {
                         )
                         .child(
                             Button::new(format!("automatic-sleep-start-plus-{day}"))
-                                .label("start + 30 min")
+                                .ghost()
+                                .compact()
+                                .label("start +")
                                 .disabled(busy || !day_enabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.adjust_automatic_sleep_timer_window(day, true, 30, cx);
@@ -23902,7 +23529,9 @@ impl MetrolistShell {
                         )
                         .child(
                             Button::new(format!("automatic-sleep-end-minus-{day}"))
-                                .label("end − 30 min")
+                                .ghost()
+                                .compact()
+                                .label("end −")
                                 .disabled(busy || !day_enabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.adjust_automatic_sleep_timer_window(day, false, -30, cx);
@@ -23916,7 +23545,9 @@ impl MetrolistShell {
                         )
                         .child(
                             Button::new(format!("automatic-sleep-end-plus-{day}"))
-                                .label("end + 30 min")
+                                .ghost()
+                                .compact()
+                                .label("end +")
                                 .disabled(busy || !day_enabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.adjust_automatic_sleep_timer_window(day, false, 30, cx);
@@ -23924,470 +23555,163 @@ impl MetrolistShell {
                         )
                 });
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Sleep timer behavior"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Applied when starting a timer from the full player or Queue panel."),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Finish current song"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("After a minute timer expires, either pause immediately or wait for the current song to end."),
-                    ),
-            )
+            .gap_3()
+            .w_full()
             .child(
                 h_flex()
                     .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child("Duration"))
                     .child(
-                        Button::new("sleep-timer-finish-song-off")
-                            .label("Stop at timer")
-                            .selected(!self.settings_draft.sleep_timer_stop_after_current_song)
-                            .disabled(busy)
+                        Button::new("automatic-sleep-duration-minus")
+                            .ghost()
+                            .compact()
+                            .label("− 5 min")
+                            .disabled(
+                                busy || automatic_schedule.duration_minutes
+                                    <= MIN_SLEEP_TIMER_MINUTES,
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.sleep_timer_stop_after_current_song = false;
+                                this.settings_draft.automatic_sleep_timer.duration_minutes = this
+                                    .settings_draft
+                                    .automatic_sleep_timer
+                                    .duration_minutes
+                                    .saturating_sub(5)
+                                    .max(MIN_SLEEP_TIMER_MINUTES);
                                 this.settings_error = None;
                                 this.settings_notice = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Button::new("sleep-timer-finish-song-on")
-                            .label("Finish current song")
-                            .selected(self.settings_draft.sleep_timer_stop_after_current_song)
-                            .disabled(busy)
+                        div()
+                            .w(px(84.))
+                            .text_center()
+                            .child(format!("{} minutes", automatic_schedule.duration_minutes)),
+                    )
+                    .child(
+                        Button::new("automatic-sleep-duration-plus")
+                            .ghost()
+                            .compact()
+                            .label("+ 5 min")
+                            .disabled(
+                                busy || automatic_schedule.duration_minutes
+                                    >= MAX_SLEEP_TIMER_MINUTES,
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.sleep_timer_stop_after_current_song = true;
+                                this.settings_draft.automatic_sleep_timer.duration_minutes = this
+                                    .settings_draft
+                                    .automatic_sleep_timer
+                                    .duration_minutes
+                                    .saturating_add(5)
+                                    .min(MAX_SLEEP_TIMER_MINUTES);
                                 this.settings_error = None;
                                 this.settings_notice = None;
                                 cx.notify();
                             })),
                     ),
             )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Fade out"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Gradually lower only the audio output during the final 60 seconds before playback stops."),
-                    ),
-            )
+            .child(div().text_sm().font_medium().child("Presets"))
             .child(
                 h_flex()
                     .gap_2()
+                    .flex_wrap()
                     .child(
-                        Button::new("sleep-timer-fade-out-off")
-                            .label("Full volume")
-                            .selected(!self.settings_draft.sleep_timer_fade_out)
+                        Button::new("automatic-sleep-preset-daily")
+                            .ghost()
+                            .compact()
+                            .label("Daily")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.sleep_timer_fade_out = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
+                                this.set_automatic_sleep_timer_preset(
+                                    AutomaticSleepTimerPreset::Daily,
+                                    cx,
+                                );
                             })),
                     )
                     .child(
-                        Button::new("sleep-timer-fade-out-on")
-                            .label("Fade last 60 seconds")
-                            .selected(self.settings_draft.sleep_timer_fade_out)
+                        Button::new("automatic-sleep-preset-weekdays")
+                            .ghost()
+                            .compact()
+                            .label("Weekdays")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.sleep_timer_fade_out = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
+                                this.set_automatic_sleep_timer_preset(
+                                    AutomaticSleepTimerPreset::Weekdays,
+                                    cx,
+                                );
                             })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().font_semibold().child("Automatic sleep timer"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Start the configured sleep timer when playback begins during a local schedule window. Windows may cross midnight; changes take effect after Save and apply."),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("automatic-sleep-disabled")
-                                    .label("Off")
-                                    .selected(!automatic_schedule.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.automatic_sleep_timer.enabled = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("automatic-sleep-enabled")
-                                    .label("On")
-                                    .selected(automatic_schedule.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.automatic_sleep_timer.enabled = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_sm().child("Duration"))
-                            .child(
-                                Button::new("automatic-sleep-duration-minus")
-                                    .label("− 5 min")
-                                    .disabled(
-                                        busy
-                                            || automatic_schedule.duration_minutes
-                                                <= MIN_SLEEP_TIMER_MINUTES,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.automatic_sleep_timer.duration_minutes =
-                                            this.settings_draft
-                                                .automatic_sleep_timer
-                                                .duration_minutes
-                                                .saturating_sub(5)
-                                                .max(MIN_SLEEP_TIMER_MINUTES);
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(84.))
-                                    .text_center()
-                                    .child(format!(
-                                        "{} minutes",
-                                        automatic_schedule.duration_minutes
-                                    )),
-                            )
-                            .child(
-                                Button::new("automatic-sleep-duration-plus")
-                                    .label("+ 5 min")
-                                    .disabled(
-                                        busy
-                                            || automatic_schedule.duration_minutes
-                                                >= MAX_SLEEP_TIMER_MINUTES,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.automatic_sleep_timer.duration_minutes =
-                                            this.settings_draft
-                                                .automatic_sleep_timer
-                                                .duration_minutes
-                                                .saturating_add(5)
-                                                .min(MAX_SLEEP_TIMER_MINUTES);
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(div().text_sm().font_medium().child("Presets"))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                Button::new("automatic-sleep-preset-daily")
-                                    .label("Daily")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_automatic_sleep_timer_preset(
-                                            AutomaticSleepTimerPreset::Daily,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("automatic-sleep-preset-weekdays")
-                                    .label("Weekdays")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_automatic_sleep_timer_preset(
-                                            AutomaticSleepTimerPreset::Weekdays,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("automatic-sleep-preset-weekends")
-                                    .label("Weekends")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_automatic_sleep_timer_preset(
-                                            AutomaticSleepTimerPreset::Weekends,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
-                    .child(div().text_sm().font_medium().child("Custom days"))
-                    .children(automatic_day_rows),
-            )
-            .into_any_element()
-    }
-
-    fn render_skip_silence_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Skip silence"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Compress sustained near-silent audio while keeping playback position, lyrics, history, and timers aligned to the original media timeline."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("skip-silence-off")
-                            .label("Play all audio")
-                            .selected(!self.settings_draft.skip_silence)
+                        Button::new("automatic-sleep-preset-weekends")
+                            .ghost()
+                            .compact()
+                            .label("Weekends")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.skip_silence = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("skip-silence-on")
-                            .label("Compress silence")
-                            .selected(self.settings_draft.skip_silence)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.skip_silence = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
+                                this.set_automatic_sleep_timer_preset(
+                                    AutomaticSleepTimerPreset::Weekends,
+                                    cx,
+                                );
                             })),
                     ),
             )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Instant skip"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("After two continuous seconds of silence, skip the remainder immediately instead of retaining compressed samples."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("skip-silence-instant-off")
-                            .label("Normal compression")
-                            .selected(!self.settings_draft.skip_silence_instant)
-                            .disabled(busy || !self.settings_draft.skip_silence)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.skip_silence_instant = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("skip-silence-instant-on")
-                            .label("Instant after 2 seconds")
-                            .selected(self.settings_draft.skip_silence_instant)
-                            .disabled(busy || !self.settings_draft.skip_silence)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.skip_silence_instant = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(div().text_sm().font_medium().child("Custom days"))
+            .children(automatic_day_rows)
             .into_any_element()
     }
 
     fn render_crossfade_settings(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
+        if !self.settings_draft.crossfade {
+            return div().into_any_element();
+        }
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(div().text_sm().child("Duration"))
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("Crossfade"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Overlap the end of the current song with the beginning of the next song on the same audio output."),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("crossfade-off")
-                            .label("Off")
-                            .selected(!self.settings_draft.crossfade)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.crossfade = false;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
+                Button::new("crossfade-duration-less")
+                    .ghost()
+                    .compact()
+                    .label("− 1 s")
+                    .disabled(
+                        busy || self.settings_draft.crossfade_seconds <= MIN_CROSSFADE_SECONDS,
                     )
-                    .child(
-                        Button::new("crossfade-on")
-                            .label("On")
-                            .selected(self.settings_draft.crossfade)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_draft.crossfade = true;
-                                this.settings_error = None;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_draft.crossfade_seconds = this
+                            .settings_draft
+                            .crossfade_seconds
+                            .saturating_sub(1)
+                            .max(MIN_CROSSFADE_SECONDS);
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    })),
             )
-            .when(self.settings_draft.crossfade, |card| {
-                card.child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().font_semibold().child("Duration"))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    Button::new("crossfade-duration-less")
-                                        .label("− 1 second")
-                                        .disabled(
-                                            busy
-                                                || self.settings_draft.crossfade_seconds
-                                                    <= MIN_CROSSFADE_SECONDS,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.settings_draft.crossfade_seconds = this
-                                                .settings_draft
-                                                .crossfade_seconds
-                                                .saturating_sub(1)
-                                                .max(MIN_CROSSFADE_SECONDS);
-                                            this.settings_error = None;
-                                            this.settings_notice = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    div().font_semibold().child(format!(
-                                        "{} seconds",
-                                        self.settings_draft.crossfade_seconds
-                                    )),
-                                )
-                                .child(
-                                    Button::new("crossfade-duration-more")
-                                        .label("+ 1 second")
-                                        .disabled(
-                                            busy
-                                                || self.settings_draft.crossfade_seconds
-                                                    >= MAX_CROSSFADE_SECONDS,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.settings_draft.crossfade_seconds = this
-                                                .settings_draft
-                                                .crossfade_seconds
-                                                .saturating_add(1)
-                                                .min(MAX_CROSSFADE_SECONDS);
-                                            this.settings_error = None;
-                                            this.settings_notice = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().font_semibold().child("Gapless albums"))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Keep the original transition when consecutive songs share the same album."),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("crossfade-gapless-off")
-                                .label("Always crossfade")
-                                .selected(!self.settings_draft.crossfade_gapless_albums)
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.settings_draft.crossfade_gapless_albums = false;
-                                    this.settings_error = None;
-                                    this.settings_notice = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("crossfade-gapless-on")
-                                .label("Keep same album gapless")
-                                .selected(self.settings_draft.crossfade_gapless_albums)
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.settings_draft.crossfade_gapless_albums = true;
-                                    this.settings_error = None;
-                                    this.settings_notice = None;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .font_medium()
+                    .child(format!("{} seconds", self.settings_draft.crossfade_seconds)),
+            )
+            .child(
+                Button::new("crossfade-duration-more")
+                    .ghost()
+                    .compact()
+                    .label("+ 1 s")
+                    .disabled(
+                        busy || self.settings_draft.crossfade_seconds >= MAX_CROSSFADE_SECONDS,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_draft.crossfade_seconds = this
+                            .settings_draft
+                            .crossfade_seconds
+                            .saturating_add(1)
+                            .min(MAX_CROSSFADE_SECONDS);
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 
@@ -24422,29 +23746,16 @@ impl MetrolistShell {
         let country_selection = self.settings_draft.content_country.clone();
 
         v_flex()
-            .gap_4()
-            .max_w(px(680.))
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .p_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().font_semibold().child("YouTube Music content locale"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Choose the language and country or region sent with Home, Search, Browse, Radio, and account-library requests."),
-                    ),
-            )
+            .gap_3()
+            .w_full()
             .child(
                 v_flex()
                     .gap_1()
                     .child(div().text_sm().child("Content language"))
                     .child(
                         Button::new("content-language")
+                            .ghost()
+                            .compact()
                             .label(language_label)
                             .disabled(busy)
                             .dropdown_menu(move |menu, _, _| {
@@ -24496,6 +23807,8 @@ impl MetrolistShell {
                     .child(div().text_sm().child("Content country or region"))
                     .child(
                         Button::new("content-country")
+                            .ghost()
+                            .compact()
                             .label(country_label)
                             .disabled(busy)
                             .dropdown_menu(move |menu, _, _| {
@@ -24550,8 +23863,28 @@ impl MetrolistShell {
             .into_any_element()
     }
 
-    fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let busy = self.settings_operation == SettingsOperation::Applying
+    fn content_filters(&self) -> ContentFilters {
+        self.settings.content_filters()
+    }
+
+    fn visible_songs(&self, songs: impl IntoIterator<Item = Song>) -> Vec<Song> {
+        self.content_filters().songs(songs)
+    }
+
+    fn visible_browse_items(&self, items: impl IntoIterator<Item = BrowseItem>) -> Vec<BrowseItem> {
+        self.content_filters().browse_items(items)
+    }
+
+    fn visible_search_result(&self, result: &SearchResult) -> SearchResult {
+        SearchResult {
+            songs: self.visible_songs(result.songs.iter().cloned()),
+            items: self.visible_browse_items(result.items.iter().cloned()),
+            continuation: result.continuation.clone(),
+        }
+    }
+
+    fn settings_editor_busy(&self) -> bool {
+        self.settings_operation == SettingsOperation::Applying
             || self.storage_operation != StorageOperation::Idle
             || self.library_busy()
             || self.search_history_task.is_some()
@@ -24560,1484 +23893,1098 @@ impl MetrolistShell {
             || self.account_operation != AccountOperation::Idle
             || self.lastfm_operation != LastFmOperation::Idle
             || self.cloud_busy()
-            || matches!(self.account_state, AccountViewState::Checking);
-        let download_count = match &self.downloads_state {
-            StoredViewState::Loaded(downloads) => downloads.len(),
-            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
-        };
-        let listening_history_count = match &self.history_state {
-            HistoryViewState::Loaded(history) => history.len(),
-            HistoryViewState::Loading | HistoryViewState::Failed(_) => 0,
-        };
-        let search_history_count = match &self.search_history_state {
-            StoredViewState::Loaded(history) => history.len(),
-            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
-        };
-        let clearing_listening_history =
-            self.library_operation == LibraryOperation::ClearingHistory;
-        let clearing_search_history =
-            search_history_count > 0 && self.search_history_task.is_some();
-        v_flex()
-            .gap_6()
-            .child(self.page_heading(
-                "Settings",
-                "Configure appearance, network routing, stream quality, and cache storage.",
-                cx,
-            ))
-            .child(self.render_account_settings(cx))
-            .child(self.render_lastfm_settings(cx))
-            .child(self.render_listen_together_settings(busy, cx))
-            .child(self.render_discord_settings(busy, cx))
-            .child(self.render_playback_parameters_settings(busy, cx))
-            .child(self.render_content_locale_settings(busy, cx))
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Appearance"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Choose a light or dark theme. Save below to keep it after restart."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("theme-light")
-                                    .icon(IconName::Sun)
-                                    .label("Light")
-                                    .selected(self.theme_mode == ThemeMode::Light)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.theme_mode = ThemeMode::Light;
-                                        this.settings_draft.theme = AppTheme::Light;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        Theme::change(ThemeMode::Light, Some(window), cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("theme-dark")
-                                    .icon(IconName::Moon)
-                                    .label("Dark")
-                                    .selected(self.theme_mode == ThemeMode::Dark)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.theme_mode = ThemeMode::Dark;
-                                        this.settings_draft.theme = AppTheme::Dark;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        Theme::change(ThemeMode::Dark, Some(window), cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
+            || matches!(self.account_state, AccountViewState::Checking)
+    }
+
+    fn settings_pages(&self, cx: &mut Context<Self>) -> Vec<SettingPage> {
+        let view = cx.entity();
+        let bool_item = |title: &'static str,
+                         description: &'static str,
+                         get: fn(&AppSettings) -> bool,
+                         set: fn(&mut AppSettings, bool)| {
+            let view_g = view.clone();
+            let view_s = view.clone();
+            SettingItem::new(
+                title,
+                SettingField::switch(
+                    move |cx| get(&view_g.read(cx).settings_draft),
+                    move |val, cx| {
+                        view_s.update(cx, |this, cx| {
+                            set(&mut this.settings_draft, val);
+                            this.settings_error = None;
+                            this.settings_notice = None;
+                            cx.notify();
+                        });
+                    },
+                ),
             )
-            .child(self.render_audio_outputs(cx))
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Network proxy"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Applied consistently to YouTube Music, lyrics, artwork, and audio streams."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("proxy-disabled")
-                                    .label("Direct")
-                                    .selected(!self.settings_draft.proxy.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.proxy.enabled = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
+            .description(description)
+        };
+        let embed = |render: fn(&MetrolistShell, &mut Context<MetrolistShell>) -> AnyElement| {
+            let view = view.clone();
+            SettingItem::render(move |_, _, cx| view.update(cx, |this, cx| render(this, cx)))
+        };
+        let embed_busy =
+            |render: fn(&MetrolistShell, bool, &mut Context<MetrolistShell>) -> AnyElement| {
+                let view = view.clone();
+                SettingItem::render(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        let busy = this.settings_editor_busy();
+                        render(this, busy, cx)
+                    })
+                })
+            };
+
+        vec![
+            SettingPage::new(settings_page_title(0))
+                .icon(IconName::User)
+                .description(settings_page_description(0))
+                .resettable(false)
+                .default_open(true)
+                .group(
+                    SettingGroup::new()
+                        .title("YouTube Music")
+                        .description("Sessions stay in the OS secret store, never in SQLite.")
+                        .item(embed(MetrolistShell::render_account_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Last.fm")
+                        .description("Optional scrobbling. The session key stays in the OS secret store.")
+                        .item(embed(MetrolistShell::render_lastfm_settings))
+                        .item(self.settings_lastfm_min_track_item(&view))
+                        .item(self.settings_lastfm_percent_item(&view))
+                        .item(self.settings_lastfm_max_delay_item(&view))
+                        .item(embed(MetrolistShell::render_lastfm_policy_reset))
+                        .item(
+                            bool_item(
+                                "Scrobble",
+                                "Submit a play after the configured listen threshold.",
+                                |settings| settings.lastfm_scrobbling,
+                                |settings, value| settings.lastfm_scrobbling = value,
                             )
-                            .child(
-                                Button::new("proxy-enabled")
-                                    .label("Use proxy")
-                                    .selected(self.settings_draft.proxy.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.proxy.enabled = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .when(self.settings_draft.proxy.enabled, |card| {
-                        card.child(
-                            h_flex().gap_2().children(ProxyKind::ALL.into_iter().map(|kind| {
-                                Button::new(format!("proxy-kind-{}", kind.label()))
-                                    .label(kind.label())
-                                    .selected(self.settings_draft.proxy.kind == kind)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.settings_draft.proxy.kind = kind;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    }))
-                            })),
+                            .disabled(!self.lastfm_session.is_some() || self.lastfm_api_credentials.is_none()),
                         )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Address"))
-                                .child(
-                                    Input::new(&self.proxy_address_input)
-                                        .content_type(InputContentType::Url)
-                                        .disabled(busy),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(div().text_sm().child("Username (optional)"))
-                                        .child(
-                                            Input::new(&self.proxy_username_input)
-                                                .content_type(InputContentType::Username)
-                                                .disabled(busy),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(div().text_sm().child("Password (optional)"))
-                                        .child(
-                                            Input::new(&self.proxy_password_input)
-                                                .content_type(InputContentType::Password)
-                                                .mask_toggle()
-                                                .disabled(busy),
-                                        ),
-                                ),
-                        )
-                    }),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Progressive seek"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Double-click the left or right half of the full-player artwork to seek 5 seconds. Progressive mode increases consecutive seeks to 10, 15, and more seconds."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("progressive-seek-off")
-                                    .label("Fixed 5 seconds")
-                                    .selected(!self.settings_draft.progressive_seek)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.progressive_seek = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
+                        .item(
+                            bool_item(
+                                "Now Playing",
+                                "Update Last.fm while a track is playing.",
+                                |settings| settings.lastfm_now_playing,
+                                |settings, value| settings.lastfm_now_playing = value,
                             )
-                            .child(
-                                Button::new("progressive-seek-on")
-                                    .label("Increase each seek")
-                                    .selected(self.settings_draft.progressive_seek)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.progressive_seek = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .child(self.render_sleep_timer_settings(busy, cx))
-            .child(self.render_skip_silence_settings(busy, cx))
-            .child(self.render_crossfade_settings(busy, cx))
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Equalizer"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Use imported AutoEQ/APO parametric profiles or the compatible ten-band graphic equalizer below."),
-                            ),
-                    )
-                    .child(self.render_equalizer_profiles(busy, cx))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("equalizer-on")
-                                    .label("On")
-                                    .selected(self.settings_draft.equalizer.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.equalizer.enabled = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
+                            .disabled(!self.lastfm_session.is_some() || self.lastfm_api_credentials.is_none()),
+                        )
+                        .item(
+                            bool_item(
+                                "Sync likes",
+                                "Love or unlove the Last.fm track when local favourite state changes.",
+                                |settings| settings.lastfm_sync_likes,
+                                |settings, value| settings.lastfm_sync_likes = value,
                             )
-                            .child(
-                                Button::new("equalizer-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.equalizer.enabled)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.equalizer.enabled = false;
-                                        this.settings_draft.equalizer.active_profile = None;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex().gap_2().flex_wrap().children(
-                            EqualizerPreset::ALL.into_iter().map(|preset| {
-                                Button::new(format!(
-                                    "equalizer-preset-{}",
-                                    preset.label().to_lowercase()
-                                ))
-                                .label(preset.label())
-                                .selected(
-                                    self.settings_draft.equalizer.preset() == Some(preset)
-                                        && (preset != EqualizerPreset::Flat
-                                            || !self.settings_draft.equalizer.enabled),
-                                )
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.settings_draft.equalizer =
-                                        EqualizerSettings::from_preset(preset);
-                                    this.settings_error = None;
-                                    this.settings_notice = None;
-                                    cx.notify();
-                                }))
-                            }),
+                            .disabled(!self.lastfm_session.is_some() || self.lastfm_api_credentials.is_none()),
                         ),
-                    )
-                    .child(
-                        h_flex().gap_2().flex_wrap().children(
-                            EQUALIZER_FREQUENCIES_HZ.into_iter().enumerate().map(
-                                |(index, frequency)| {
-                                    let gain_mb = self.settings_draft.equalizer.gains_mb[index];
-                                    v_flex()
-                                        .w(px(116.))
-                                        .gap_2()
-                                        .rounded(cx.theme().radius)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .p_3()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format_equalizer_frequency(frequency)),
-                                        )
-                                        .child(
-                                            div().font_medium().child(format!(
-                                                "{:+.0} dB",
-                                                f32::from(gain_mb) / 100.0
-                                            )),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .child(
-                                                    Button::new(format!(
-                                                        "equalizer-band-{index}-down"
-                                                    ))
-                                                    .ghost()
-                                                    .label("−")
-                                                    .disabled(
-                                                        busy
-                                                            || gain_mb
-                                                                <= MIN_EQUALIZER_GAIN_MB,
-                                                    )
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.settings_draft.equalizer
-                                                                .gains_mb[index] = this
-                                                                .settings_draft
-                                                                .equalizer
-                                                                .gains_mb[index]
-                                                                .saturating_sub(100)
-                                                                .max(MIN_EQUALIZER_GAIN_MB);
-                                                            this.settings_draft.equalizer.enabled =
-                                                                true;
-                                                            this.settings_draft
-                                                                .equalizer
-                                                                .active_profile = None;
-                                                            this.settings_error = None;
-                                                            this.settings_notice = None;
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                                )
-                                                .child(
-                                                    Button::new(format!(
-                                                        "equalizer-band-{index}-up"
-                                                    ))
-                                                    .ghost()
-                                                    .label("+")
-                                                    .disabled(
-                                                        busy
-                                                            || gain_mb
-                                                                >= MAX_EQUALIZER_GAIN_MB,
-                                                    )
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.settings_draft.equalizer
-                                                                .gains_mb[index] = this
-                                                                .settings_draft
-                                                                .equalizer
-                                                                .gains_mb[index]
-                                                                .saturating_add(100)
-                                                                .min(MAX_EQUALIZER_GAIN_MB);
-                                                            this.settings_draft.equalizer.enabled =
-                                                                true;
-                                                            this.settings_draft
-                                                                .equalizer
-                                                                .active_profile = None;
-                                                            this.settings_error = None;
-                                                            this.settings_notice = None;
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                                ),
-                                        )
-                                },
-                            ),
-                        ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Listening history duration"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Count a play after this much real playback. The same threshold is used for local history and enabled YouTube Music history sync."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .child(div().w(px(28.)).text_xs().child("1 s"))
-                            .child(
-                                div().flex_1().min_w(px(160.)).child(
-                                    Slider::new(&self.history_duration_slider)
-                                        .horizontal()
-                                        .disabled(busy),
-                                ),
+                ),
+            SettingPage::new(settings_page_title(1))
+                .icon(IconName::Network)
+                .description(settings_page_description(1))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("Listen Together")
+                        .description("Create or join a room. The server gets titles and timing, never cookies or audio.")
+                        .item(embed_busy(MetrolistShell::render_listen_together_settings))
+                        .item(bool_item(
+                            "Auto-approve joins",
+                            "Let guests enter without a host tap.",
+                            |settings| settings.listen_together.auto_approve_joins,
+                            |settings, value| settings.listen_together.auto_approve_joins = value,
+                        ))
+                        .item(bool_item(
+                            "Auto-approve suggestions",
+                            "Add guest track suggestions to the queue automatically.",
+                            |settings| settings.listen_together.auto_approve_suggestions,
+                            |settings, value| {
+                                settings.listen_together.auto_approve_suggestions = value
+                            },
+                        ))
+                        .item(bool_item(
+                            "Sync host volume",
+                            "Guests follow the host volume when the host changes it.",
+                            |settings| settings.listen_together.sync_host_volume,
+                            |settings, value| settings.listen_together.sync_host_volume = value,
+                        )),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Discord")
+                        .description("Local IPC only — no Discord token or OAuth.")
+                        .item(bool_item(
+                            "Rich Presence",
+                            "Share the current song with the Discord desktop client on this computer.",
+                            |settings| settings.discord_rich_presence,
+                            |settings, value| settings.discord_rich_presence = value,
+                        ))
+                        .item(embed_busy(MetrolistShell::render_discord_settings)),
+                ),
+            SettingPage::new(settings_page_title(2))
+                .icon(IconName::Play)
+                .description(settings_page_description(2))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("Speed and pitch")
+                        .description("Save to rebuild the audio chain at the current position.")
+                        .item(self.settings_varispeed_item(&view))
+                        .item(embed_busy(
+                            MetrolistShell::render_playback_parameters_settings,
+                        )),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Player behavior")
+                        .item(bool_item(
+                            "Progressive artwork seek",
+                            "Repeated double-clicks on the artwork increase the jump from 5 to 10, 15… seconds.",
+                            |settings| settings.progressive_seek,
+                            |settings, value| settings.progressive_seek = value,
+                        ))
+                        .item(bool_item(
+                            "Autoplay next song",
+                            "When Repeat is off, start the next queued song after the current one ends.",
+                            |settings| settings.autoplay,
+                            |settings, value| settings.autoplay = value,
+                        ))
+                        .item(bool_item(
+                            "Persistent queue",
+                            "Restore the queue, current song, and position after restart.",
+                            |settings| settings.persistent_queue,
+                            |settings, value| settings.persistent_queue = value,
+                        ))
+                        .item(bool_item(
+                            "Skip to next on error",
+                            "If recovery fails, continue with the next queued song.",
+                            |settings| settings.auto_skip_next_on_error,
+                            |settings, value| settings.auto_skip_next_on_error = value,
+                        ))
+                        .item(bool_item(
+                            "Auto-download liked songs",
+                            "Queue an offline download after a song is added to local favourites.",
+                            |settings| settings.auto_download_on_like,
+                            |settings, value| settings.auto_download_on_like = value,
+                        )),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Sleep timer")
+                        .description("Used when starting a timer from the player or Queue.")
+                        .item(bool_item(
+                            "Finish current song",
+                            "When a minute timer expires, wait for the current song to end instead of pausing immediately.",
+                            |settings| settings.sleep_timer_stop_after_current_song,
+                            |settings, value| settings.sleep_timer_stop_after_current_song = value,
+                        ))
+                        .item(bool_item(
+                            "Fade out last 60 seconds",
+                            "Lower only the audio output during the final minute before stop.",
+                            |settings| settings.sleep_timer_fade_out,
+                            |settings, value| settings.sleep_timer_fade_out = value,
+                        ))
+                        .item(self.settings_automatic_sleep_item(&view))
+                        .item(embed_busy(MetrolistShell::render_sleep_timer_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Skip silence")
+                        .item(bool_item(
+                            "Compress silence",
+                            "Shorten sustained near-silent audio while keeping lyrics, history, and timers on the original timeline.",
+                            |settings| settings.skip_silence,
+                            |settings, value| settings.skip_silence = value,
+                        ))
+                        .item(
+                            bool_item(
+                                "Instant skip after 2 seconds",
+                                "After two continuous seconds of silence, jump the rest instead of keeping compressed samples.",
+                                |settings| settings.skip_silence_instant,
+                                |settings, value| settings.skip_silence_instant = value,
                             )
-                            .child(div().w(px(42.)).text_xs().child("100 s")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_medium()
-                            .child(format!(
-                                "{} second{}",
-                                self.settings_draft.history_duration_seconds,
-                                if self.settings_draft.history_duration_seconds == 1 {
-                                    ""
-                                } else {
-                                    "s"
+                            .disabled(!self.settings_draft.skip_silence),
+                        ),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Crossfade")
+                        .item(bool_item(
+                            "Crossfade tracks",
+                            "Overlap the end of the current song with the start of the next on the same output.",
+                            |settings| settings.crossfade,
+                            |settings, value| settings.crossfade = value,
+                        ))
+                        .item(
+                            bool_item(
+                                "Keep same-album gapless",
+                                "Do not crossfade when consecutive songs share the same album.",
+                                |settings| settings.crossfade_gapless_albums,
+                                |settings, value| settings.crossfade_gapless_albums = value,
+                            )
+                            .disabled(!self.settings_draft.crossfade),
+                        )
+                        .item(embed_busy(MetrolistShell::render_crossfade_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Radio and shuffle")
+                        .item(bool_item(
+                            "Start radio from search and home",
+                            "Playing a single song from Search or Home also starts its YouTube Radio.",
+                            |settings| settings.auto_radio_queue,
+                            |settings, value| settings.auto_radio_queue = value,
+                        ))
+                        .item(bool_item(
+                            "Similar content near the end",
+                            "When five or fewer songs remain, load similar recommendations.",
+                            |settings| settings.auto_radio,
+                            |settings, value| settings.auto_radio = value,
+                        ))
+                        .item(bool_item(
+                            "Auto-load more radio",
+                            "Request the next Radio page when the queue is almost empty.",
+                            |settings| settings.auto_load_more,
+                            |settings, value| settings.auto_load_more = value,
+                        ))
+                        .item(bool_item(
+                            "Stop loading during Repeat All",
+                            "Do not fetch more similar songs while Repeat All is active.",
+                            |settings| settings.disable_load_more_when_repeat_all,
+                            |settings, value| settings.disable_load_more_when_repeat_all = value,
+                        ))
+                        .item(bool_item(
+                            "Keep Shuffle on new queues",
+                            "If Shuffle is already on, leave it on when a collection replaces the queue.",
+                            |settings| settings.persistent_shuffle_across_queues,
+                            |settings, value| settings.persistent_shuffle_across_queues = value,
+                        ))
+                        .item(bool_item(
+                            "Shuffle playlist or album first",
+                            "Finish the original collection before later queued and radio songs.",
+                            |settings| settings.shuffle_playlist_first,
+                            |settings, value| settings.shuffle_playlist_first = value,
+                        ))
+                        .item(bool_item(
+                            "Remember shuffle and repeat",
+                            "Restore Shuffle and Repeat after a cold start.",
+                            |settings| settings.remember_shuffle_and_repeat,
+                            |settings, value| settings.remember_shuffle_and_repeat = value,
+                        ))
+                        .item(bool_item(
+                            "Prevent duplicate queue tracks",
+                            "Play next and Add to queue replace older copies of the same song.",
+                            |settings| settings.prevent_duplicate_tracks_in_queue,
+                            |settings, value| settings.prevent_duplicate_tracks_in_queue = value,
+                        )),
+                ),
+            SettingPage::new(settings_page_title(3))
+                .icon(IconName::Settings2)
+                .description(settings_page_description(3))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("Output")
+                        .description("Switching keeps the current track and position.")
+                        .item(embed(MetrolistShell::render_audio_outputs)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Equalizer")
+                        .item(bool_item(
+                            "Enable equalizer",
+                            "Apply the ten-band graphic EQ or an imported AutoEQ/APO profile.",
+                            |settings| settings.equalizer.enabled,
+                            |settings, value| {
+                                settings.equalizer.enabled = value;
+                                if !value {
+                                    settings.equalizer.active_profile = None;
                                 }
-                            )),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Privacy history"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Keep existing history while controlling whether new local plays and searches are saved."),
-                            ),
+                            },
+                        ))
+                        .item(self.settings_eq_preset_item(&view))
+                        .item(embed(MetrolistShell::render_equalizer_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Processing")
+                        .item(bool_item(
+                            "Audio normalization",
+                            "Match perceived loudness across tracks.",
+                            |settings| settings.audio_normalization,
+                            |settings, value| settings.audio_normalization = value,
+                        ))
+                        .item(bool_item(
+                            "Pause when muted",
+                            "Pause if the volume slider or system media volume reaches zero.",
+                            |settings| settings.pause_on_mute,
+                            |settings, value| settings.pause_on_mute = value,
+                        ))
+                        .item(self.settings_quality_item(&view))
+                        .item(self.settings_loudness_item(&view)),
+                ),
+            SettingPage::new(settings_page_title(4))
+                .icon(IconName::Palette)
+                .description(settings_page_description(4))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("Theme")
+                        .item(self.settings_theme_item(&view)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Content locale")
+                        .description("Sent with Home, Search, Browse, Radio, and library requests.")
+                        .item(embed_busy(MetrolistShell::render_content_locale_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Content filters")
+                        .description("Hide matching items on Home, Explore, Search, Browse, and Library. An already-playing queue is left unchanged.")
+                        .item(bool_item(
+                            "Hide explicit content",
+                            "Omit items that carry a real explicit badge. Items without that flag stay visible.",
+                            |settings| settings.hide_explicit,
+                            |settings, value| settings.hide_explicit = value,
+                        ))
+                        .item(bool_item(
+                            "Hide video songs",
+                            "Omit songs whose music-video type is present and is not ATV.",
+                            |settings| settings.hide_video_songs,
+                            |settings, value| settings.hide_video_songs = value,
+                        ))
+                        .item(bool_item(
+                            "Hide YouTube Shorts",
+                            "Omit playlists whose id starts with SS after any VL prefix.",
+                            |settings| settings.hide_youtube_shorts,
+                            |settings, value| settings.hide_youtube_shorts = value,
+                        )),
+                ),
+            SettingPage::new(settings_page_title(5))
+                .icon(IconName::Globe)
+                .description(settings_page_description(5))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("Proxy")
+                        .item(bool_item(
+                            "Use a proxy",
+                            "Route YouTube Music, lyrics, artwork, and audio through the address below.",
+                            |settings| settings.proxy.enabled,
+                            |settings, value| settings.proxy.enabled = value,
+                        ))
+                        .item(self.settings_proxy_kind_item(&view))
+                        .item(embed(MetrolistShell::render_proxy_settings)),
+                ),
+            SettingPage::new(settings_page_title(6))
+                .icon(IconName::BookOpen)
+                .description(settings_page_description(6))
+                .resettable(false)
+                .group(
+                    SettingGroup::new()
+                        .title("History")
+                        .item(bool_item(
+                            "Pause local listening history",
+                            "Keep playing without writing new local history entries.",
+                            |settings| settings.pause_listening_history,
+                            |settings, value| settings.pause_listening_history = value,
+                        ))
+                        .item(bool_item(
+                            "Pause search history",
+                            "Do not save new search queries on this device.",
+                            |settings| settings.pause_search_history,
+                            |settings, value| settings.pause_search_history = value,
+                        ))
+                        .item(bool_item(
+                            "Sync YouTube Music history",
+                            "Record plays to the signed-in YouTube Music account.",
+                            |settings| settings.youtube_history_sync,
+                            |settings, value| settings.youtube_history_sync = value,
+                        ))
+                        .item(embed(MetrolistShell::render_history_duration_settings)),
+                )
+                .group(
+                    SettingGroup::new()
+                        .title("Cache and downloads")
+                        .item(self.settings_cache_size_item(&view))
+                        .item(embed(MetrolistShell::render_cache_settings))
+                        .item(embed(MetrolistShell::render_storage_cleanup_settings)),
+                ),
+        ]
+    }
+
+    fn settings_varispeed_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Varispeed",
+            SettingField::switch(
+                move |cx| view_g.read(cx).settings_draft.playback_parameters.varispeed,
+                move |val, cx| {
+                    view_s.update(cx, |this, cx| {
+                        this.settings_draft.playback_parameters.varispeed = val;
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Link pitch to speed like tape. Off keeps pitch while tempo changes.")
+    }
+
+    fn settings_automatic_sleep_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Automatic schedule",
+            SettingField::switch(
+                move |cx| view_g.read(cx).settings_draft.automatic_sleep_timer.enabled,
+                move |val, cx| {
+                    view_s.update(cx, |this, cx| {
+                        this.settings_draft.automatic_sleep_timer.enabled = val;
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Start the configured timer when playback begins inside a local window.")
+    }
+
+    fn settings_lastfm_min_track_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Minimum track length",
+            SettingField::number_input(
+                NumberFieldOptions {
+                    min: 10.0,
+                    max: 60.0,
+                    step: 5.0,
+                },
+                move |cx| {
+                    f64::from(
+                        view_g
+                            .read(cx)
+                            .settings_draft
+                            .lastfm_scrobble_policy
+                            .min_track_seconds,
                     )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(div().text_sm().font_medium().child("Pause listening history"))
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("local-listening-history-record")
-                                            .label("Record plays")
-                                            .selected(
-                                                !self.settings_draft.pause_listening_history,
-                                            )
-                                            .disabled(busy)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.settings_draft.pause_listening_history = false;
-                                                this.settings_error = None;
-                                                this.settings_notice = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("local-listening-history-pause")
-                                            .label("Pause")
-                                            .selected(
-                                                self.settings_draft.pause_listening_history,
-                                            )
-                                            .disabled(busy)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.settings_draft.pause_listening_history = true;
-                                                this.settings_error = None;
-                                                this.settings_notice = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("settings-clear-listening-history")
-                                            .danger()
-                                            .label(if clearing_listening_history {
-                                                "Clearing…"
-                                            } else {
-                                                "Clear listening history"
-                                            })
-                                            .loading(clearing_listening_history)
-                                            .disabled(busy || listening_history_count == 0)
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    this.confirm_clear_history(
-                                                        listening_history_count,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            )),
-                                    ),
-                            ),
+                },
+                move |value, cx| {
+                    view_s.update(cx, |this, cx| {
+                        this.settings_draft.lastfm_scrobble_policy.min_track_seconds =
+                            (value.round() as u16).clamp(10, 60);
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Do not scrobble tracks shorter than this, in seconds.")
+    }
+
+    fn settings_lastfm_percent_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Played percentage",
+            SettingField::number_input(
+                NumberFieldOptions {
+                    min: 30.0,
+                    max: 95.0,
+                    step: 5.0,
+                },
+                move |cx| {
+                    f64::from(
+                        view_g
+                            .read(cx)
+                            .settings_draft
+                            .lastfm_scrobble_policy
+                            .delay_percent_milli,
+                    ) / 10.0
+                },
+                move |value, cx| {
+                    view_s.update(cx, |this, cx| {
+                        this.settings_draft
+                            .lastfm_scrobble_policy
+                            .delay_percent_milli = ((value * 10.0).round() as u16).clamp(300, 950);
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Scrobble after this much of the track has actually played.")
+    }
+
+    fn settings_lastfm_max_delay_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Maximum delay",
+            SettingField::number_input(
+                NumberFieldOptions {
+                    min: 30.0,
+                    max: 360.0,
+                    step: 30.0,
+                },
+                move |cx| {
+                    f64::from(
+                        view_g
+                            .read(cx)
+                            .settings_draft
+                            .lastfm_scrobble_policy
+                            .max_delay_seconds,
                     )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(div().text_sm().font_medium().child("Pause search history"))
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("local-search-history-record")
-                                            .label("Save searches")
-                                            .selected(!self.settings_draft.pause_search_history)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.settings_draft.pause_search_history = false;
-                                                this.settings_error = None;
-                                                this.settings_notice = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("local-search-history-pause")
-                                            .label("Pause")
-                                            .selected(self.settings_draft.pause_search_history)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.settings_draft.pause_search_history = true;
-                                                this.settings_error = None;
-                                                this.settings_notice = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("settings-clear-search-history")
-                                            .danger()
-                                            .label(if clearing_search_history {
-                                                "Clearing…"
-                                            } else {
-                                                "Clear search history"
-                                            })
-                                            .loading(clearing_search_history)
-                                            .disabled(busy || search_history_count == 0)
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    this.confirm_clear_search_history(
-                                                        search_history_count,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            )),
-                                    ),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("YouTube Music listening history"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When signed in, register one remote play after 30 seconds. Local history is controlled separately above."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("youtube-history-sync-on")
-                                    .label("Sync plays")
-                                    .selected(self.settings_draft.youtube_history_sync)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.youtube_history_sync = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("youtube-history-sync-off")
-                                    .label("Pause remote history")
-                                    .selected(!self.settings_draft.youtube_history_sync)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.youtube_history_sync = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Volume normalization"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Match track loudness using YouTube's measured metadata. Gain is limited to −15 dB through +3 dB and clipped safely before output."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("audio-normalization-on")
-                                    .label("On")
-                                    .selected(self.settings_draft.audio_normalization)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.audio_normalization = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("audio-normalization-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.audio_normalization)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.audio_normalization = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .when(self.settings_draft.audio_normalization, |card| {
-                        card.child(
-                            h_flex().gap_2().flex_wrap().children(
-                                LoudnessLevel::ALL.into_iter().map(|level| {
-                                    Button::new(format!(
-                                        "loudness-level-{}",
-                                        level.label().to_lowercase()
-                                    ))
-                                    .label(format!(
-                                        "{} ({} LUFS)",
-                                        level.label(),
-                                        level.target_lufs_mb() / 100
-                                    ))
-                                    .selected(self.settings_draft.loudness_level == level)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.settings_draft.loudness_level = level;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    }))
-                                }),
-                            ),
+                },
+                move |value, cx| {
+                    view_s.update(cx, |this, cx| {
+                        this.settings_draft.lastfm_scrobble_policy.max_delay_seconds =
+                            (value.round() as u16).clamp(30, 360);
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Cap the wait even if the played-percentage threshold is later.")
+    }
+
+    fn settings_cache_size_item(&self, view: &Entity<Self>) -> SettingItem {
+        const SIZES_MIB: [u64; 5] = [128, 512, 1024, 2048, 4096];
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Playback cache size",
+            SettingField::dropdown(
+                SIZES_MIB
+                    .into_iter()
+                    .map(|mebibytes| {
+                        (
+                            SharedString::from(mebibytes.to_string()),
+                            SharedString::from(format!("{mebibytes} MiB")),
                         )
                     })
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Pause music when muted"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Pause when the Metrolist volume reaches zero, then resume only if that mute action caused the pause."),
-                            ),
+                    .collect(),
+                move |cx| {
+                    SharedString::from(
+                        (view_g.read(cx).settings_draft.audio_cache_bytes / 1024 / 1024)
+                            .to_string(),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("pause-on-mute-off")
-                                    .label("Keep playing")
-                                    .selected(!self.settings_draft.pause_on_mute)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.pause_on_mute = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("pause-on-mute-on")
-                                    .label("Pause and resume")
-                                    .selected(self.settings_draft.pause_on_mute)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.pause_on_mute = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
+                },
+                move |value, cx| {
+                    if let Ok(mebibytes) = value.as_ref().parse::<u64>() {
+                        if SIZES_MIB.contains(&mebibytes) {
+                            view_s.update(cx, |this, cx| {
+                                this.settings_draft.audio_cache_bytes = mebibytes * 1024 * 1024;
+                                this.settings_error = None;
+                                this.settings_notice = None;
+                                cx.notify();
+                            });
+                        }
+                    }
+                },
+            ),
+        )
+        .description("Maximum on-disk audio cache. Applied when you save.")
+    }
+
+    fn settings_eq_preset_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Preset",
+            SettingField::dropdown(
+                EqualizerSettings::preset_dropdown_options()
+                    .into_iter()
+                    .map(|(key, label)| (SharedString::from(key), SharedString::from(label)))
+                    .collect(),
+                move |cx| {
+                    SharedString::from(
+                        view_g
+                            .read(cx)
+                            .settings_draft
+                            .equalizer
+                            .preset_dropdown_value(),
+                    )
+                },
+                move |value, cx| {
+                    view_s.update(cx, |this, cx| {
+                        if this
+                            .settings_draft
+                            .equalizer
+                            .apply_preset_dropdown_value(value.as_ref())
+                        {
+                            this.settings_error = None;
+                            this.settings_notice = None;
+                            cx.notify();
+                        }
+                    });
+                },
+            ),
+        )
+        .description(
+            "Named presets replace custom band gains and any imported profile. Custom is shown when the current bands do not match a preset.",
+        )
+    }
+
+    fn settings_proxy_kind_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Proxy type",
+            SettingField::dropdown(
+                ProxyKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        (
+                            SharedString::from(kind.storage_value()),
+                            SharedString::from(kind.label()),
+                        )
+                    })
+                    .collect(),
+                move |cx| {
+                    SharedString::from(view_g.read(cx).settings_draft.proxy.kind.storage_value())
+                },
+                move |value, cx| {
+                    if let Ok(kind) = ProxyKind::from_storage(value.as_ref()) {
+                        view_s.update(cx, |this, cx| {
+                            this.settings_draft.proxy.kind = kind;
+                            this.settings_error = None;
+                            this.settings_notice = None;
+                            cx.notify();
+                        });
+                    }
+                },
+            ),
+        )
+        .description("HTTP or SOCKS5. Applied after Save and apply.")
+        .disabled(!self.settings_draft.proxy.enabled)
+    }
+
+    fn settings_theme_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Color mode",
+            SettingField::dropdown(
+                vec![
+                    ("light".into(), "Light".into()),
+                    ("dark".into(), "Dark".into()),
+                ],
+                move |cx| {
+                    if view_g.read(cx).theme_mode == ThemeMode::Dark {
+                        "dark".into()
+                    } else {
+                        "light".into()
+                    }
+                },
+                move |value, cx| {
+                    let dark = value.as_ref() == "dark";
+                    view_s.update(cx, |this, cx| {
+                        this.theme_mode = if dark {
+                            ThemeMode::Dark
+                        } else {
+                            ThemeMode::Light
+                        };
+                        this.settings_draft.theme = if dark {
+                            AppTheme::Dark
+                        } else {
+                            AppTheme::Light
+                        };
+                        this.settings_error = None;
+                        this.settings_notice = None;
+                        Theme::change(this.theme_mode, None, cx);
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .description("Applies immediately. Save to keep it after restart.")
+    }
+
+    fn settings_quality_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Stream quality",
+            SettingField::dropdown(
+                AudioQuality::ALL
+                    .into_iter()
+                    .map(|quality| {
+                        (
+                            SharedString::from(quality.storage_value()),
+                            SharedString::from(quality.label()),
+                        )
+                    })
+                    .collect(),
+                move |cx| {
+                    SharedString::from(view_g.read(cx).settings_draft.audio_quality.storage_value())
+                },
+                move |value, cx| {
+                    if let Ok(quality) = AudioQuality::from_storage(value.as_ref()) {
+                        view_s.update(cx, |this, cx| {
+                            this.settings_draft.audio_quality = quality;
+                            this.settings_error = None;
+                            this.settings_notice = None;
+                            cx.notify();
+                        });
+                    }
+                },
+            ),
+        )
+        .description("Used for streaming and new offline downloads.")
+    }
+
+    fn settings_loudness_item(&self, view: &Entity<Self>) -> SettingItem {
+        let view_g = view.clone();
+        let view_s = view.clone();
+        SettingItem::new(
+            "Loudness target",
+            SettingField::dropdown(
+                LoudnessLevel::ALL
+                    .into_iter()
+                    .map(|level| {
+                        (
+                            SharedString::from(level.storage_value()),
+                            SharedString::from(level.label()),
+                        )
+                    })
+                    .collect(),
+                move |cx| {
+                    SharedString::from(
+                        view_g
+                            .read(cx)
+                            .settings_draft
+                            .loudness_level
+                            .storage_value(),
+                    )
+                },
+                move |value, cx| {
+                    if let Some(level) = LoudnessLevel::ALL
+                        .into_iter()
+                        .find(|level| level.storage_value() == value.as_ref())
+                    {
+                        view_s.update(cx, |this, cx| {
+                            this.settings_draft.loudness_level = level;
+                            this.settings_error = None;
+                            this.settings_notice = None;
+                            cx.notify();
+                        });
+                    }
+                },
+            ),
+        )
+        .description("Only used while audio normalization is on.")
+        .disabled(!self.settings_draft.audio_normalization)
+    }
+
+    fn render_equalizer_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.settings_editor_busy();
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(self.render_equalizer_profiles(busy, cx))
+            .child(
+                h_flex().gap_2().flex_wrap().children(
+                    EQUALIZER_FREQUENCIES_HZ
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, frequency)| {
+                            let gain_mb = self.settings_draft.equalizer.gains_mb[index];
+                            v_flex()
+                                .w(px(88.))
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format_equalizer_frequency(frequency)),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_medium()
+                                        .child(format!("{:+.0} dB", f32::from(gain_mb) / 100.0)),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            Button::new(format!("equalizer-band-{index}-down"))
+                                                .ghost()
+                                                .compact()
+                                                .label("−")
+                                                .disabled(busy || gain_mb <= MIN_EQUALIZER_GAIN_MB)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.settings_draft.equalizer.gains_mb[index] =
+                                                        this.settings_draft.equalizer.gains_mb
+                                                            [index]
+                                                            .saturating_sub(100)
+                                                            .max(MIN_EQUALIZER_GAIN_MB);
+                                                    this.settings_draft.equalizer.enabled = true;
+                                                    this.settings_draft.equalizer.active_profile =
+                                                        None;
+                                                    this.settings_error = None;
+                                                    this.settings_notice = None;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(format!("equalizer-band-{index}-up"))
+                                                .ghost()
+                                                .compact()
+                                                .label("+")
+                                                .disabled(busy || gain_mb >= MAX_EQUALIZER_GAIN_MB)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.settings_draft.equalizer.gains_mb[index] =
+                                                        this.settings_draft.equalizer.gains_mb
+                                                            [index]
+                                                            .saturating_add(100)
+                                                            .min(MAX_EQUALIZER_GAIN_MB);
+                                                    this.settings_draft.equalizer.enabled = true;
+                                                    this.settings_draft.equalizer.active_profile =
+                                                        None;
+                                                    this.settings_error = None;
+                                                    this.settings_notice = None;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_proxy_settings(&self, _cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.settings_editor_busy();
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                Input::new(&self.proxy_address_input)
+                    .content_type(InputContentType::Url)
+                    .disabled(busy || !self.settings_draft.proxy.enabled),
             )
             .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
+                h_flex()
+                    .gap_3()
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Audio quality"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Auto selects the best direct AAC stream; Low caps at 128 kbps; High prioritizes YouTube's high-quality marker."),
-                            ),
-                    )
-                    .child(
-                        h_flex().gap_2().children(AudioQuality::ALL.into_iter().map(|quality| {
-                            Button::new(format!("audio-quality-{}", quality.label()))
-                                .label(quality.label())
-                                .selected(self.settings_draft.audio_quality == quality)
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.settings_draft.audio_quality = quality;
-                                    this.settings_error = None;
-                                    this.settings_notice = None;
-                                    cx.notify();
-                                }))
-                        })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Queue persistence"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Choose whether the current queue, song, playback position, and reusable source metadata return after restarting Metrolist."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                Button::new("persistent-queue-on")
-                                    .label("Restore last queue")
-                                    .selected(self.settings_draft.persistent_queue)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.persistent_queue = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("persistent-queue-off")
-                                    .label("Do not restore")
-                                    .selected(!self.settings_draft.persistent_queue)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.persistent_queue = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Auto radio queue"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Choose whether clicking a song in Search or Home starts its YouTube Music Radio or only that selected song. Play all is unchanged."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("auto-radio-queue-on")
-                                    .label("Start Radio")
-                                    .selected(self.settings_draft.auto_radio_queue)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_radio_queue = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("auto-radio-queue-off")
-                                    .label("Selected song only")
-                                    .selected(!self.settings_draft.auto_radio_queue)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_radio_queue = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Auto-download on like"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Automatically add a song to the existing offline download queue after it is successfully added to Favorites."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("auto-download-like-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.auto_download_on_like)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_download_on_like = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("auto-download-like-on")
-                                    .label("Download favorites")
-                                    .selected(self.settings_draft.auto_download_on_like)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_download_on_like = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Autoplay"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When Repeat is off, automatically play the next queued song after the current song ends."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("autoplay-on")
-                                    .label("On")
-                                    .selected(self.settings_draft.autoplay)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.autoplay = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("autoplay-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.autoplay)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.autoplay = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Shuffle across new queues"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When Shuffle is already on, keep it on when a normal collection replaces the queue."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("shuffle-across-queues-reset")
-                                    .label("Reset")
-                                    .selected(
-                                        !self.settings_draft.persistent_shuffle_across_queues,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.persistent_shuffle_across_queues = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("shuffle-across-queues-keep")
-                                    .label("Keep on")
-                                    .selected(
-                                        self.settings_draft.persistent_shuffle_across_queues,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.persistent_shuffle_across_queues = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Shuffle playlist or album first"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("While shuffling, finish the original playlist or album before later queued and Automatic radio songs."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("shuffle-primary-mix")
-                                    .label("Mix all")
-                                    .selected(!self.settings_draft.shuffle_playlist_first)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.shuffle_playlist_first = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("shuffle-primary-first")
-                                    .label("Original first")
-                                    .selected(self.settings_draft.shuffle_playlist_first)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.shuffle_playlist_first = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Remember Shuffle and Repeat"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Restore both queue modes after restarting Metrolist without changing their current values when this setting is saved."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("remember-queue-modes-on")
-                                    .label("On")
-                                    .selected(self.settings_draft.remember_shuffle_and_repeat)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.remember_shuffle_and_repeat = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("remember-queue-modes-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.remember_shuffle_and_repeat)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.remember_shuffle_and_repeat = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .child("Prevent duplicate tracks in queue"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When an added song already exists in the queue, move its non-playing copies from their previous positions instead of adding another copy."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("queue-duplicates-allow")
-                                    .label("Allow duplicates")
-                                    .selected(
-                                        !self.settings_draft.prevent_duplicate_tracks_in_queue,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.prevent_duplicate_tracks_in_queue =
-                                            false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("queue-duplicates-move")
-                                    .label("Move existing")
-                                    .selected(
-                                        self.settings_draft.prevent_duplicate_tracks_in_queue,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.prevent_duplicate_tracks_in_queue = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Auto skip on playback error"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("After the existing playback recovery attempt fails, continue with the next queued song. Repeated failures stop automatically."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("auto-skip-error-off")
-                                    .label("Stop on error")
-                                    .selected(!self.settings_draft.auto_skip_next_on_error)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_skip_next_on_error = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("auto-skip-error-on")
-                                    .label("Skip next")
-                                    .selected(self.settings_draft.auto_skip_next_on_error)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_skip_next_on_error = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Similar content"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When an ordinary eligible queue has five or fewer songs remaining, start similar YouTube Music recommendations."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("auto-radio-on")
-                                    .label("On")
-                                    .selected(self.settings_draft.auto_radio)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_radio = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("auto-radio-off")
-                                    .label("Off")
-                                    .selected(!self.settings_draft.auto_radio)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_radio = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Auto load more"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("When an active Radio queue has a next page and five or fewer songs remain, append it automatically."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("auto-load-more-on")
-                                    .label("Load next page")
-                                    .selected(self.settings_draft.auto_load_more)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_load_more = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("auto-load-more-off")
-                                    .label("Do not auto-load")
-                                    .selected(!self.settings_draft.auto_load_more)
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.auto_load_more = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Repeat All behavior"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Choose whether Automatic radio can add more songs while Repeat All is active."),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("repeat-all-radio-keep-loading")
-                                    .label("Keep loading")
-                                    .selected(
-                                        !self.settings_draft.disable_load_more_when_repeat_all,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.disable_load_more_when_repeat_all = false;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("repeat-all-radio-do-not-load")
-                                    .label("Do not load")
-                                    .selected(
-                                        self.settings_draft.disable_load_more_when_repeat_all,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_draft.disable_load_more_when_repeat_all = true;
-                                        this.settings_error = None;
-                                        this.settings_notice = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Cache storage"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Artwork and aligned 512 KiB audio blocks are stored below and reused across sessions."),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_sm().child("Cache directory"))
-                            .child(Input::new(&self.cache_root_input).disabled(busy)),
-                    )
-                    .child(div().text_sm().child("Audio cache capacity"))
-                    .child(
-                        h_flex().gap_2().flex_wrap().children(
-                            [128_u64, 512, 1024, 2048, 4096]
-                                .into_iter()
-                                .map(|mebibytes| {
-                                    let bytes = mebibytes * 1024 * 1024;
-                                    Button::new(format!("audio-cache-{mebibytes}"))
-                                        .label(format!("{mebibytes} MiB"))
-                                        .selected(self.settings_draft.audio_cache_bytes == bytes)
-                                        .disabled(busy)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.settings_draft.audio_cache_bytes = bytes;
-                                            this.settings_error = None;
-                                            this.settings_notice = None;
-                                            cx.notify();
-                                        }))
-                                }),
+                        div().flex_1().child(
+                            Input::new(&self.proxy_username_input)
+                                .content_type(InputContentType::Username)
+                                .disabled(busy || !self.settings_draft.proxy.enabled),
                         ),
                     )
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "Active: {} MiB at {}",
-                                self.settings.audio_cache_bytes / 1024 / 1024,
-                                self.settings.cache_root.display()
-                            )),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .max_w(px(680.))
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .p_5()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Storage cleanup"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "Clear reusable caches independently or remove all {download_count} explicit offline download record(s)."
-                                    )),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("clear-playback-cache")
-                                    .label(if self.storage_operation
-                                        == StorageOperation::ClearingPlaybackCache
-                                    {
-                                        "Clearing playback cache…"
-                                    } else {
-                                        "Clear playback cache"
-                                    })
-                                    .loading(
-                                        self.storage_operation
-                                            == StorageOperation::ClearingPlaybackCache,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_clear_playback_cache(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("clear-artwork-cache")
-                                    .label(if self.storage_operation
-                                        == StorageOperation::ClearingArtworkCache
-                                    {
-                                        "Clearing artwork cache…"
-                                    } else {
-                                        "Clear artwork cache"
-                                    })
-                                    .loading(
-                                        self.storage_operation
-                                            == StorageOperation::ClearingArtworkCache,
-                                    )
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_clear_artwork_cache(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("remove-all-downloads-settings")
-                                    .danger()
-                                    .label(if self.storage_operation
-                                        == StorageOperation::RemovingDownloads
-                                    {
-                                        "Removing downloads…"
-                                    } else {
-                                        "Remove all downloads"
-                                    })
-                                    .loading(
-                                        self.storage_operation
-                                            == StorageOperation::RemovingDownloads,
-                                    )
-                                    .disabled(busy || download_count == 0)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_remove_all_downloads(window, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .when_some(self.settings_error.clone(), |page, error| {
-                page.child(
-                    div()
-                        .max_w(px(680.))
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_color(cx.theme().danger)
-                        .p_3()
-                        .text_sm()
-                        .child(error),
-                )
-            })
-            .when_some(self.settings_notice.clone(), |page, notice| {
-                page.child(
-                    div()
-                        .max_w(px(680.))
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().success.opacity(0.12))
-                        .text_color(cx.theme().success)
-                        .p_3()
-                        .text_sm()
-                        .child(notice),
-                )
-            })
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("settings-apply")
-                            .primary()
-                            .label(
-                                if self.settings_operation == SettingsOperation::Applying {
-                                    "Applying…"
-                                } else {
-                                    "Save and apply"
-                                },
-                            )
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_settings(window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("settings-reset")
-                            .label("Reset unsaved changes")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.reset_settings_editor(window, cx)
-                            })),
+                        div().flex_1().child(
+                            Input::new(&self.proxy_password_input)
+                                .content_type(InputContentType::Password)
+                                .mask_toggle()
+                                .disabled(busy || !self.settings_draft.proxy.enabled),
+                        ),
                     ),
             )
             .into_any_element()
     }
 
-    fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_history_duration_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Count a play after this much real playback."),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(div().text_xs().child("1 s"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.))
+                            .child(Slider::new(&self.history_duration_slider).horizontal()),
+                    )
+                    .child(div().text_sm().font_medium().child(format!(
+                        "{} s",
+                        self.settings_draft.history_duration_seconds
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    fn render_cache_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.settings_editor_busy();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(Input::new(&self.cache_root_input).disabled(busy))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "Active: {} MiB at {}",
+                        self.settings.audio_cache_bytes / 1024 / 1024,
+                        self.settings.cache_root.display()
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_storage_cleanup_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.settings_editor_busy();
+        let download_count = match &self.downloads_state {
+            StoredViewState::Loaded(downloads) => downloads.len(),
+            StoredViewState::Loading | StoredViewState::Failed(_) => 0,
+        };
+        h_flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                Button::new("clear-playback-cache")
+                    .ghost()
+                    .compact()
+                    .label(
+                        if self.storage_operation == StorageOperation::ClearingPlaybackCache {
+                            "Clearing…"
+                        } else {
+                            "Clear playback cache"
+                        },
+                    )
+                    .loading(self.storage_operation == StorageOperation::ClearingPlaybackCache)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.confirm_clear_playback_cache(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("clear-artwork-cache")
+                    .ghost()
+                    .compact()
+                    .label(
+                        if self.storage_operation == StorageOperation::ClearingArtworkCache {
+                            "Clearing…"
+                        } else {
+                            "Clear artwork cache"
+                        },
+                    )
+                    .loading(self.storage_operation == StorageOperation::ClearingArtworkCache)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.confirm_clear_artwork_cache(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("remove-all-downloads-settings")
+                    .danger()
+                    .compact()
+                    .label(
+                        if self.storage_operation == StorageOperation::RemovingDownloads {
+                            "Removing…"
+                        } else {
+                            "Remove all downloads"
+                        },
+                    )
+                    .loading(self.storage_operation == StorageOperation::RemovingDownloads)
+                    .disabled(busy || download_count == 0)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.confirm_remove_all_downloads(window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.settings_editor_busy();
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .gap_3()
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_lg().font_semibold().child("Settings"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Search a page, then save to apply network, cache, and audio-chain changes."),
+                            ),
+                    )
+                    .child(
+                        Button::new("settings-reset")
+                            .ghost()
+                            .compact()
+                            .label("Reset")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.reset_settings_editor(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-apply")
+                            .primary()
+                            .compact()
+                            .label(if self.settings_operation == SettingsOperation::Applying {
+                                "Saving…"
+                            } else {
+                                "Save and apply"
+                            })
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.apply_settings(window, cx)
+                            })),
+                    ),
+            )
+            .when_some(self.settings_error.clone(), |page, error| {
+                page.child(Alert::error("settings-error", error).small())
+            })
+            .when_some(self.settings_notice.clone(), |page, notice| {
+                page.child(Alert::success("settings-notice", notice).small())
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        Settings::new("metrolist-settings")
+                            .with_group_variant(GroupBoxVariant::Outline)
+                            .sidebar_width(px(196.))
+                            .pages(self.settings_pages(cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.model.route() {
             Route::Home => self.render_home(cx),
             Route::Explore => self.render_explore(cx),
@@ -26046,7 +24993,7 @@ impl MetrolistShell {
             Route::History => self.render_history(cx),
             Route::Stats => self.render_stats(cx),
             Route::Library => self.render_library(cx),
-            Route::Settings => self.render_settings(cx),
+            Route::Settings => self.render_settings(window, cx),
         }
     }
 
@@ -29279,7 +28226,7 @@ impl Render for MetrolistShell {
                 .min_h_0()
                 .child(self.render_sidebar(window, cx))
                 .child(
-                    if matches!(self.model.route(), Route::History)
+                    if matches!(self.model.route(), Route::History | Route::Settings)
                         || (self.model.route() == Route::Library && self.playlist_detail.is_none())
                     {
                         v_flex()
@@ -29289,7 +28236,7 @@ impl Render for MetrolistShell {
                             .h_full()
                             .px_6()
                             .py_5()
-                            .child(self.render_page(cx))
+                            .child(self.render_page(window, cx))
                             .into_any_element()
                     } else {
                         v_flex()
@@ -29300,7 +28247,7 @@ impl Render for MetrolistShell {
                             .overflow_y_scrollbar()
                             .px_6()
                             .py_5()
-                            .child(self.render_page(cx))
+                            .child(self.render_page(window, cx))
                             .into_any_element()
                     },
                 )
@@ -29692,6 +28639,8 @@ mod tests {
             thumbnail_url: None,
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         }
     }
 
@@ -29704,6 +28653,7 @@ mod tests {
             thumbnail_url: None,
             params: None,
             editable: false,
+            explicit: false,
         }
     }
 
@@ -30072,6 +29022,8 @@ mod tests {
             thumbnail_url: None,
             album: None,
             is_episode: false,
+            explicit: false,
+            music_video_type: None,
         };
 
         assert!(!lyrics_request_matches_current(Some(&current), "old-song"));
