@@ -1,9 +1,10 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Collapsible, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, Theme,
-    ThemeMode, VirtualListScrollHandle, WindowExt,
+    ActiveTheme, Collapsible, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt,
+    Theme, ThemeMode, TitleBar, VirtualListScrollHandle, WindowExt,
     alert::Alert,
+    avatar::Avatar,
     button::{Button, ButtonVariant, ButtonVariants},
     clipboard::Clipboard,
     description_list::{DescriptionItem, DescriptionList},
@@ -12134,12 +12135,26 @@ impl MetrolistShell {
 
     fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.sidebar_collapsed;
+        let icon_collapsed = collapsed;
         let (account_title, account_detail) =
             sidebar_account_summary(&self.account_state, self.account_operation);
-        let account_icon = match self.account_state {
-            AccountViewState::Checking => IconName::LoaderCircle,
-            AccountViewState::Expired(_) | AccountViewState::Failed(_) => IconName::TriangleAlert,
-            AccountViewState::SignedOut | AccountViewState::SignedIn(_) => IconName::User,
+        let cached_account_image = match &self.account_state {
+            AccountViewState::SignedIn(profile) => profile
+                .thumbnail_url
+                .as_deref()
+                .and_then(|url| self.thumbnail_images.get(url).cloned()),
+            _ => None,
+        };
+        let account_avatar = match &self.account_state {
+            AccountViewState::SignedIn(profile) => Avatar::new()
+                .name(profile.name.clone())
+                .small()
+                .when_some(cached_account_image, |avatar, image| avatar.src(image)),
+            AccountViewState::Checking => Avatar::new().placeholder(IconName::LoaderCircle).small(),
+            AccountViewState::Expired(_) | AccountViewState::Failed(_) => {
+                Avatar::new().placeholder(IconName::TriangleAlert).small()
+            }
+            AccountViewState::SignedOut => Avatar::new().placeholder(IconName::User).small(),
         };
         let view = cx.entity();
         Sidebar::new("metrolist-sidebar")
@@ -12150,26 +12165,34 @@ impl MetrolistShell {
                 SidebarHeader::new()
                     .child(
                         div()
-                            .size_8()
                             .flex()
                             .items_center()
                             .justify_center()
+                            .size_8()
                             .flex_shrink_0()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().sidebar_primary)
                             .text_color(cx.theme().sidebar_primary_foreground)
+                            .when(icon_collapsed, |mark| {
+                                mark.size_4()
+                                    .bg(cx.theme().transparent)
+                                    .text_color(cx.theme().foreground)
+                            })
                             .child(Icon::new(IconName::Play)),
                     )
-                    .when(!collapsed, |header| {
+                    .when(!icon_collapsed, |header| {
                         header.child(
                             v_flex()
-                                .min_w_0()
                                 .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .child(div().font_semibold().child("Metrolist"))
-                                .child(caption_line(
-                                    "Music for desktop",
-                                    cx.theme().muted_foreground,
-                                )),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Music for desktop"),
+                                ),
                         )
                     })
                     .child(SidebarToggleButton::new().collapsed(collapsed).on_click({
@@ -12224,12 +12247,13 @@ impl MetrolistShell {
                                 SidebarFooter::new()
                                     .collapsed(collapsed)
                                     .selected(self.model.route() == Route::Settings)
-                                    .child(Icon::new(account_icon).size_4())
-                                    .when(!collapsed, |footer| {
+                                    .child(account_avatar)
+                                    .when(!icon_collapsed, |footer| {
                                         footer.child(
                                             v_flex()
                                                 .min_w_0()
                                                 .flex_1()
+                                                .overflow_hidden()
                                                 .child(title_line(account_title).text_sm())
                                                 .child(caption_line(
                                                     account_detail,
@@ -12251,7 +12275,13 @@ impl MetrolistShell {
         v_flex()
             .flex_shrink_0()
             .gap_1()
-            .child(div().text_2xl().font_semibold().child(title))
+            .child(
+                div()
+                    .text_2xl()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(title),
+            )
             .child(
                 div()
                     .text_sm()
@@ -12268,29 +12298,35 @@ impl MetrolistShell {
         cx: &App,
     ) -> impl IntoElement {
         v_flex()
+            .id(title)
             .flex_1()
             .min_w(px(180.))
-            .gap_3()
-            .rounded(cx.theme().radius_lg)
-            .bg(cx.theme().secondary)
-            .p_5()
+            .hover(|style| style.opacity(0.94))
+            .active(|style| style.opacity(0.88))
             .child(
-                div()
-                    .size_9()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
-                    .child(Icon::new(icon)),
-            )
-            .child(div().font_semibold().child(title))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(description),
+                GroupBox::new().fill().child(
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size_9()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .rounded(cx.theme().radius)
+                                .bg(cx.theme().primary)
+                                .text_color(cx.theme().primary_foreground)
+                                .child(Icon::new(icon)),
+                        )
+                        .child(div().font_semibold().child(title))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(description),
+                        ),
+                ),
             )
     }
 
@@ -28255,14 +28291,77 @@ impl Render for MetrolistShell {
                 .into_any_element()
         };
 
+        let route_title = self.model.route().title();
+        let view = cx.entity();
+
         v_flex()
             .size_full()
             .min_w(px(720.))
             .min_h(px(520.))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(
+                TitleBar::new()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().font_semibold().child("Metrolist"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(route_title),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .px_2()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new("titlebar-search")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::Search)
+                                    .tooltip("Search")
+                                    .selected(self.model.route() == Route::Search)
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.navigate(Route::Search, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("titlebar-settings")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::Settings)
+                                    .tooltip("Settings")
+                                    .selected(self.model.route() == Route::Settings)
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.navigate(Route::Settings, cx);
+                                            });
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
             .child(upper_content)
             .child(self.render_player(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

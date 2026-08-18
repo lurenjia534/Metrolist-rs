@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use gpui_component_assets::Assets;
 use metrolist_rs::{
     AppConfig, AppSettings, AppTheme, Result,
@@ -107,7 +107,8 @@ fn run() -> Result<()> {
                 size(px(config.window_width), px(config.window_height)),
                 cx,
             )),
-            ..Default::default()
+            window_min_size: Some(size(px(720.), px(520.))),
+            ..TitleBar::window_options()
         };
 
         cx.spawn(async move |cx| {
